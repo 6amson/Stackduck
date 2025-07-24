@@ -6,6 +6,8 @@ use sqlx::{Type, FromRow};
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use uuid::Uuid;
+use strum_macros::Display;
+
 
 pub type InMemoryQueue = Arc<Mutex<HashMap<String, VecDeque<Job>>>>;
 
@@ -15,11 +17,9 @@ pub struct Job {
     pub job_type: String,
     pub payload: serde_json::Value,
     pub status: String,
-    // pub queue: Option<String>,
     pub priority: Option<i32>,
     pub retry_count: Option<i32>,
     pub max_retries: Option<i32>,
-    pub error_message: Option<String>,
     pub scheduled_at: Option<DateTime<Utc>>,
     pub started_at: Option<DateTime<Utc>>,
     pub completed_at: Option<DateTime<Utc>>,
@@ -27,14 +27,15 @@ pub struct Job {
     pub updated_at: Option<DateTime<Utc>>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
-#[sqlx(type_name = "TEXT")]
+#[derive(Debug, Clone, Display, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "lowercase")]
 pub enum JobStatus {
     Queued,
     Running,
-    Succeeded,
+    Completed,
     Failed,
-    Retrying,
+    Deferred,
+    Cancelled,
 }
 
 #[derive(Clone)]

@@ -6,11 +6,9 @@ CREATE TABLE IF NOT EXISTS jobs (
     job_type VARCHAR(255) NOT NULL,
     payload JSONB NOT NULL,
     status VARCHAR(50) NOT NULL DEFAULT 'queued',
-    queue VARCHAR(255), -- Optional: if you want to store queue name separately
     priority INTEGER DEFAULT 0,
     retry_count INTEGER DEFAULT 0,
     max_retries INTEGER DEFAULT 3,
-    error_message TEXT,
     scheduled_at TIMESTAMPTZ,
     started_at TIMESTAMPTZ,
     completed_at TIMESTAMPTZ,
