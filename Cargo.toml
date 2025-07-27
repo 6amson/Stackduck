@@ -16,6 +16,12 @@ dotenvy = "0.15"
 deadpool-redis = "0.22.0"
 strum = "0.25"
 strum_macros = "0.25"
+tonic = "0.13.1"
+tokio-stream = "0.1.17"
+prost = "0.14.1"
+
+[build-dependencies]
+tonic-build = "0.13.1"
 
 [features]
 default = []

@@ -20,6 +20,7 @@ pub struct Job {
     pub priority: Option<i32>,
     pub retry_count: Option<i32>,
     pub max_retries: Option<i32>,
+    pub error_message: Option<String>,
     pub scheduled_at: Option<DateTime<Utc>>,
     pub started_at: Option<DateTime<Utc>>,
     pub completed_at: Option<DateTime<Utc>>,
@@ -54,4 +55,20 @@ pub struct JobManager {
 pub struct RedisJob {
     pub id: i64,
     pub queue: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct JobNotification {
+    pub job_type: String,
+    pub notification_type: NotificationType, 
+}
+
+#[derive(Debug, Clone, Display, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "lowercase")]
+pub enum NotificationType {
+    NewJob,
+    RetryJob,
+    CancelJob,
+    CompleteJob,
+    ScheduledJob,
 }

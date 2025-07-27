@@ -1,5 +1,5 @@
+use crate::error::StackDuckError;
 use crate::types::RedisClient;
-use crate::error::StackDuckError; 
 use deadpool_redis::{Config, Runtime};
 
 pub async fn connect_to_redis(redis_url: &str) -> Result<RedisClient, StackDuckError> {
@@ -21,4 +21,3 @@ impl RedisClient {
             .map_err(|e| StackDuckError::RedisConnectionError(e.to_string()))
     }
 }
-
