@@ -46,7 +46,7 @@ impl JobQueueGrpcService {
             retry_count: job.retry_count,
             max_retries: job.max_retries,
             error_message: job.error_message,
-            delay: j
+            delay: job.delay,
             scheduled_at: job.scheduled_at.map(|dt| dt.timestamp()),
             started_at: job.started_at.map(|dt| dt.timestamp()),
             completed_at: job.completed_at.map(|dt| dt.timestamp()),

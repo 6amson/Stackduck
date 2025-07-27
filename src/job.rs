@@ -57,7 +57,7 @@ impl JobManager {
         .bind(&work.priority)
         .bind(&work.retry_count)
         .bind(&work.error_message)
-        bind(7)
+        bind(&work.delay)
         .bind(&work.max_retries)
         .bind(&work.scheduled_at)
         .fetch_one(&self.db_pool)
@@ -234,69 +234,6 @@ impl JobManager {
         Ok(())
     }
 
-    async fn handle_nack_and_retry(&self, job_id: &str, job: &Job) -> Result<(), StackDuckError> {
-        // Update in Postgres with failed status and failed_at timestamp
-        sqlx::query(
-        "UPDATE jobs SET status = 'failed', failed_at = NOW(), updated_at = NOW() WHERE id = $1"
-    )
-    .bind(job_id)
-    .execute(&self.db_pool)
-    .await
-    .map_err(|e| {
-        StackDuckError::JobError(format!("Failed to mark job as permanently failed: {}", e))
-    })?;
-
-        // Remove from Redis running queue and move to dead letter queue
-        if let Some(client) = &self.redis_pool {
-            if let Ok(mut conn) = client.get_redis_client().await {
-                // Remove from running queue (if it exists there)
-                let running_jobs: Vec<String> = conn
-                    .zrange("Stackduck:running", 0, -1)
-                    .await
-                    .map_err(|e| StackDuckError::RedisJobError(e.to_string()))?;
-                let _: () = conn.zrem("Stackduck:running", &job_id).await?;
-
-
-                let reason = format!(
-                    "Max retries ({}) exceeded with error: {}",
-                    max_retries,
-                    job.error_message.unwrap_or("No error message".to_string())
-                );
-
-                // Create dead letter queue entry with full context
-                let dead_letter_entry = serde_json::json!({
-                    "job_id": job_id,
-                    "job_type": job.job_type,
-                    "payload": job.payload,
-                    "retry_count": job.retry_count.unwrap_or(0),
-                    "max_retries": job.max_retries.unwrap_or(3),
-                    "failed_at": chrono::Utc::now().to_rfc3339(),
-                    "original_created_at": job.created_at.map(|dt| dt.to_rfc3339()),
-                    "reason": reason
-                });
-
-                // Add to dead letter queue
-                let dlq_key = format!("Stackduck:dlq:{}", job.job_type);
-                let _: Result<i32, _> = conn.lpush(&dlq_key, dead_letter_entry.to_string()).await;
-
-                // Increment dead letter queue counter for metrics
-                let dlq_count_key = format!("Stackduck:dlq:{}:count", job.job_type);
-                let _: Result<i32, _> = conn.incr(&dlq_count_key, 1).await;
-
-                // Update job status in Redis cache if it exists
-                let updates = vec![
-                    ("status", "failed".to_string()),
-                    ("failed_at", chrono::Utc::now().to_rfc3339()),
-                    ("updated_at", chrono::Utc::now().to_rfc3339()),
-                ];
-                let _ = self
-                    .update_redis_job_property(&mut conn, job_id, &updates)
-                    .await;
-            }
-        }
-
-        Ok(())
-    }
 
     pub async fn update_dequeue_job_status(
         &self,
@@ -394,8 +331,77 @@ impl JobManager {
             }
         }
 
-        // Notify workers about the retried job (after delay)
-        // This could be done via your existing notification system
+        //notification systems
+
+        Ok(())
+    }
+
+
+
+
+
+    // HELPER METHODS
+
+    async fn handle_nack_and_retry(&self, job_id: &str, job: &Job) -> Result<(), StackDuckError> {
+        // Update in Postgres with failed status and failed_at timestamp
+        sqlx::query(
+        "UPDATE jobs SET status = 'failed', failed_at = NOW(), updated_at = NOW() WHERE id = $1"
+    )
+    .bind(job_id)
+    .execute(&self.db_pool)
+    .await
+    .map_err(|e| {
+        StackDuckError::JobError(format!("Failed to mark job as permanently failed: {}", e))
+    })?;
+
+        // Remove from Redis running queue and move to dead letter queue
+        if let Some(client) = &self.redis_pool {
+            if let Ok(mut conn) = client.get_redis_client().await {
+                // Remove from running queue (if it exists there)
+                let running_jobs: Vec<String> = conn
+                    .zrange("Stackduck:running", 0, -1)
+                    .await
+                    .map_err(|e| StackDuckError::RedisJobError(e.to_string()))?;
+                let _: () = conn.zrem("Stackduck:running", &job_id).await?;
+
+
+                let reason = format!(
+                    "Max retries ({}) exceeded with error: {}",
+                    max_retries,
+                    job.error_message.unwrap_or("No error message".to_string())
+                );
+
+                // Create dead letter queue entry with full context
+                let dead_letter_entry = serde_json::json!({
+                    "job_id": job_id,
+                    "job_type": job.job_type,
+                    "payload": job.payload,
+                    "retry_count": job.retry_count.unwrap_or(0),
+                    "max_retries": job.max_retries.unwrap_or(3),
+                    "failed_at": chrono::Utc::now().to_rfc3339(),
+                    "original_created_at": job.created_at.map(|dt| dt.to_rfc3339()),
+                    "reason": reason
+                });
+
+                // Add to dead letter queue
+                let dlq_key = format!("Stackduck:dlq:{}", job.job_type);
+                let _: Result<i32, _> = conn.lpush(&dlq_key, dead_letter_entry.to_string()).await;
+
+                // Increment dead letter queue counter for metrics
+                let dlq_count_key = format!("Stackduck:dlq:{}:count", job.job_type);
+                let _: Result<i32, _> = conn.incr(&dlq_count_key, 1).await;
+
+                // Update job status in Redis cache if it exists
+                let updates = vec![
+                    ("status", "failed".to_string()),
+                    ("failed_at", chrono::Utc::now().to_rfc3339()),
+                    ("updated_at", chrono::Utc::now().to_rfc3339()),
+                ];
+                let _ = self
+                    .update_redis_job_property(&mut conn, job_id, &updates)
+                    .await;
+            }
+        }
 
         Ok(())
     }
