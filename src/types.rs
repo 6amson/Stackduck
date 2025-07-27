@@ -21,6 +21,7 @@ pub struct Job {
     pub retry_count: Option<i32>,
     pub max_retries: Option<i32>,
     pub error_message: Option<String>,
+    pub delay: Option<i32>
     pub scheduled_at: Option<DateTime<Utc>>,
     pub started_at: Option<DateTime<Utc>>,
     pub completed_at: Option<DateTime<Utc>>,

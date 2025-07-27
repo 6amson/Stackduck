@@ -18,7 +18,7 @@ A fast, lightweight distributed task queue system built in **Rust** using **gRPC
 ## 🛠️ Architecture Overview
 
 ```text
-Client (NestJS / CLI / etc)
+Client (NestJS / Flask / CLI / etc)
          |
          v
    +-------------+

@@ -46,6 +46,7 @@ impl JobQueueGrpcService {
             retry_count: job.retry_count,
             max_retries: job.max_retries,
             error_message: job.error_message,
+            delay: j
             scheduled_at: job.scheduled_at.map(|dt| dt.timestamp()),
             started_at: job.started_at.map(|dt| dt.timestamp()),
             completed_at: job.completed_at.map(|dt| dt.timestamp()),
@@ -211,7 +212,7 @@ impl JobQueueService for JobQueueGrpcService {
         let req = request.into_inner();
 
         // USE YOUR EXISTING METHOD
-        match self.job_manager.mark_job_failed(&req.job_id).await {
+        match self.job_manager.mark_job_failed(&req.job_id, &req.error_message).await {
             Ok(_) => Ok(Response::new(job_queue::FailJobResponse { success: true })),
             Err(e) => {
                 println!("Failed to mark job {} as failed: {}", req.job_id, e);
