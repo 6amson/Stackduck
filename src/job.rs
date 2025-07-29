@@ -4,31 +4,29 @@ use crate::{
     types::{Job, JobManager, JobStatus},
 };
 use chrono::Utc;
-use sqlx::{Postgres, pool::PoolConnection, prelude::*};
-use std::{collections::VecDeque, time::Duration};
-use std::{
-    fmt::format,
-    sync::{Arc, Mutex},
-};
-use tokio::time::sleep;
-use uuid::Uuid;
-// use deadpool_redis as redis;
-use deadpool_redis::redis::{FromRedisValue, Value};
-use deadpool_redis::redis::{RedisError, RedisResult};
 use deadpool_redis::{Connection, redis::AsyncCommands};
-// use std::str::FromStr;
+use std::{collections::VecDeque, vec};
+use uuid::Uuid;
 
 impl Job {
-    pub fn new(job_type: String, payload: serde_json::Value) -> Self {
+    pub fn new(
+        job_type: String,
+        payload: serde_json::Value,
+        priority: Option<i32>,
+        delay: Option<i32>,
+        max_retries: Option<i32>,
+        retry_count: Option<i32>,
+    ) -> Self {
         Self {
             id: Uuid::new_v4(),
             job_type,
             payload,
-            status: JobStatus::Queued,
-            priority: Some(0),
-            retry_count: Some(0),
-            max_retries: Some(3),
+            status: JobStatus::Queued.to_string(),
+            priority,
+            retry_count,
+            max_retries,
             error_message: None,
+            delay,
             scheduled_at: None,
             started_at: None,
             completed_at: None,
@@ -45,8 +43,8 @@ impl JobManager {
         // Save to Postgres for persistence
         let inserted_job = sqlx::query_as::<_, Job>(
             r#"
-    INSERT INTO jobs (id, job_type, payload, status, priority, retry_count, max_retries, scheduled_at) 
-    VALUES ($1, $2, $3, $4, $5, $6, $7, $8) 
+    INSERT INTO jobs (id, job_type, payload, status, priority, retry_count, max_retries, error_message, delay, scheduled_at) 
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) 
     RETURNING *
     "#,
         )
@@ -57,7 +55,7 @@ impl JobManager {
         .bind(&work.priority)
         .bind(&work.retry_count)
         .bind(&work.error_message)
-        bind(&work.delay)
+        .bind(&work.delay)
         .bind(&work.max_retries)
         .bind(&work.scheduled_at)
         .fetch_one(&self.db_pool)
@@ -73,20 +71,27 @@ impl JobManager {
         // Try Redis first
         if let Some(redis_client) = &self.redis_pool {
             if let Ok(mut conn) = redis_client.get_redis_client().await {
-                let score = inserted_job
+                let priority = inserted_job.priority.unwrap_or(0);
+
+                // Score calculation optimized for 1-3 range
+                let base_timestamp = inserted_job
                     .scheduled_at
                     .unwrap_or_else(|| Utc::now())
                     .timestamp() as f64;
 
+                // Simple scoring: priority * 1e10 + timestamp
+                // Priority 1 (high) gets lowest scores, processed first
+                let score = (-priority as f64 * 1e10) + base_timestamp;
+
                 if conn
-                    .zadd::<&str, f64, &str, Value>(&queue_key, &job_json, score)
+                    .zadd::<&str, f64, &str, i32>(&queue_key, &job_json, score)
                     .await
                     .is_ok()
                 {
                     let cache_key = format!("Stackduck:job:{}", inserted_job.id);
 
-                    todo!("Job status update in Redis for corresponding apis");
-                    let _: Result<(), _> = conn.set(&cache_key, &job_json).await;
+                    // todo!("Job status update in Redis for corresponding apis");
+                    let _: Result<(), _> = conn.set_ex(&cache_key, &job_json, 3600).await;
                     return Ok(inserted_job);
                 }
             }
@@ -106,50 +111,47 @@ impl JobManager {
 
     pub async fn dequeue(&self, queue_name: &str) -> Result<Option<Job>, StackDuckError> {
         let key = format!("Stackduck:queue:{}", queue_name);
-        let started_at = Some(Utc::now());
 
         // Try Redis first
-        if let Some(pool) = &self.redis_pool {
-            match pool.get_redis_client().await {
+        if let Some(client) = &self.redis_pool {
+            match client.get_redis_client().await {
                 Ok(mut conn) => {
                     let now = Utc::now().timestamp() as f64;
                     let processing_score = (Utc::now().timestamp() + 1800) as f64;
-                    let redis_result: Result<Option<String>, RedisError> = conn
+                    let redis_result: Vec<String> = conn
                         .zrangebyscore_limit(&key, "-inf", &now.to_string(), 0, 1)
-                        .await;
-                    match redis_result {
-                        Ok(Some(data)) => {
-                            let job_json = &results[0];
-                            let job: Job = serde_json::from_str(job_json)?;
+                        .await?;
+                    if let Some(job_json) = redis_result.first() {
+                        let job: Job = serde_json::from_str(job_json)?;
 
-                            //remove from queue
-                            let _: () = conn.zrem(&key, &data).await?;
-                            // Update status to running
-                            let job_id = job.id.to_string();
-                            let _: () = conn
-                                .zadd(
-                                    "Stackduck:running",
-                                    &format!("{}", job_id),
-                                    processing_score,
-                                )
-                                .await?;
-                            let key = format!("Stackduck:job:{}", job_id);
+                        //remove from queue
+                        let _: () = conn.zrem(&key, &job_json).await?;
+                        // Update status to running
+                        let job_id = job.id.to_string();
+                        let _: () = conn
+                            .zadd(
+                                "Stackduck:running",
+                                &format!("{}:{}", job_id, job_json),
+                                processing_score,
+                            )
+                            .await?;
 
-                            // update redis status to running.
-                            let _: () = conn.hset(&key, "status", "running").await?;
+                        // update redis status to running.
+                        let updates = vec![
+                            ("status".to_string(), JobStatus::Running.to_string()),
+                            ("started_at".to_string(), chrono::Utc::now().to_rfc3339()),
+                        ];
+                        let job_idd = job_id.clone();
+                        let _ = self
+                            .update_redis_job_property(&mut conn, job_idd, &updates)
+                            .await;
 
-                            //update postgres
-                            self.update_dequeue_job_status(&job_id, JobStatus::Running).await?;
+                        //update postgres
+                        self.update_dequeue_job_status(&job_id, JobStatus::Running)
+                            .await?;
 
-                            return Ok(Some(job));
-                        }
-                        Ok(None) => {
-                            // Redis queue is empty, continue to fallback
-                        }
-                        Err(e) => {
-                            eprintln!("Redis dequeue failed, falling back to in-memory: {}", e);
-                        }
-                    }
+                        return Ok(Some(job));
+                    };
                 }
                 Err(e) => {
                     eprintln!("Redis unavailable: {}. Falling back to in-memory queue.", e);
@@ -171,7 +173,7 @@ impl JobManager {
             eprintln!("Failed to acquire lock on in-memory queue");
         }
 
-        let job = self.update_postgres_dequeue_fallback(job, queue_name).await;
+        let job = self.update_postgres_dequeue_fallback(queue_name).await;
 
         Ok(job)
     }
@@ -188,31 +190,46 @@ impl JobManager {
 
         // Update in Redis if available
         if let Some(client) = &self.redis_pool {
-            if let Ok(conn) = client.pool.get().await {
-                let running_jobs: Vec<String> = conn.zrange("Stackduck:running", 0, -1).await;
-                let updates = vec![
-                    ("status", "completed".to_string()),
-                    ("completed_at", chrono::Utc::now().to_rfc3339()),
-                    ("updated_at", chrono::Utc::now().to_rfc3339()),
-                ];
-                let _: () = conn.zrem("Stackduck:running", &job_id).await?;
-                let _ = self.update_redis_job_property(conn, job_id, &updates).await;
+            if let Ok(mut conn) = client.get_redis_client().await {
+                match conn
+                    .zrange::<_, Vec<String>>("Stackduck:running", 0, -1)
+                    .await
+                {
+                    Ok(running_jobs) => {
+                        let job_prefix = format!("{}:", job_id);
+                        for entry in running_jobs {
+                            if entry.starts_with(&job_prefix) {
+                                let _: () = conn.zrem("Stackduck:running", &entry).await?;
+                                break;
+                            }
+                        }
+
+                        // Update job cache
+                        let updates = vec![
+                            ("status".to_string(), "completed".to_string()),
+                            ("completed_at".to_string(), chrono::Utc::now().to_rfc3339()),
+                            ("updated_at".to_string(), chrono::Utc::now().to_rfc3339()),
+                        ];
+                        let _ = self
+                            .update_redis_job_property(&mut conn, job_id.to_string(), &updates)
+                            .await;
+                    }
+                    Err(e) => {
+                        return Err(StackDuckError::RedisJobError(e));
+                    }
+                }
             }
         }
 
         Ok(())
     }
 
-    pub async fn nack_job(
-        &self,
-        job_id: &str,
-        error_message: &str,
-    ) -> Result<(), StackDuckError> {
+    pub async fn nack_job(&self, job_id: &str, error_message: &str) -> Result<(), StackDuckError> {
         // Get job details to check retry eligibility
         let job = self.get_job_by_id(job_id).await?;
-        job.error_message = Some(error_message.to_string());
 
         if let Some(mut job) = job {
+            job.error_message = Some(error_message.to_string());
             let current_retry_count = job.retry_count.unwrap_or(0);
             let max_retries = job.max_retries.unwrap_or(3);
 
@@ -222,7 +239,7 @@ impl JobManager {
                 self.retry_job(job).await?;
             } else {
                 // Max retries exceeded - mark as permanently failed and move to dead letter queue
-                self.nack_job(job_id, &job).await?;
+                self.handle_nack_and_retry(job_id, &job).await?;
             }
         } else {
             return Err(StackDuckError::JobError(format!(
@@ -234,52 +251,15 @@ impl JobManager {
         Ok(())
     }
 
-
-    pub async fn update_dequeue_job_status(
-        &self,
-        job_id: &str,
-        new_status: JobStatus,
-    ) -> Result<(), StackDuckError> {
-        // 1. Update Postgres
-        sqlx::query("UPDATE jobs SET status = $1, started_at = NOW(), updated_at = NOW() WHERE id = $2")
-            .bind(&new_status.to_string())
-            .bind(job_id)
-            .execute(&self.db_pool)
-            .await
-            .map_err(|e| {
-                StackDuckError::JobError(format!("Failed to update job status in Postgres: {}", e))
-            })?;
-
-        // 2. Update in Redis cache if available
-        if let Some(pool) = &self.redis_pool {
-            if let Ok(conn) = pool.get_redis_client().await {
-                let updated_time = Utc::now().to_rfc3339();
-                self.update_redis_job_property(
-                    conn,
-                    job_id,
-                    &[
-                        ("status", new_status.to_string()),
-                        ("updated_at", updated_time),
-                    ],
-                )
-                .await?;
-            }
-        }
-
-        Ok(())
-    }
-
-
     pub async fn retry_job(&self, mut job: Job) -> Result<(), StackDuckError> {
         // Calculate exponential backoff delay (30 seconds * 2^retry_count)
-        let retry_count = job.retry_count.unwrap_or(0);
-
-        todo!("ADD dynamic delay in job struct!");
-        let delay_seconds = 30 * (2_i64.pow(retry_count as u32));
-        let scheduled_at = chrono::Utc::now() + chrono::Duration::seconds(delay_seconds);
+        let retry_count = job.retry_count.unwrap_or(0) as u32;
+        let delayy = job.delay.unwrap_or(30);
+        let delay_seconds = delayy * (2_i32.pow(retry_count));
+        let scheduled_at = chrono::Utc::now() + chrono::Duration::seconds(delay_seconds as i64);
 
         // Update job for retry
-        job.status = "queued".to_string();
+        job.status = JobStatus::Queued.to_string();
         job.scheduled_at = Some(scheduled_at);
         job.started_at = None; // Clear previous start time
 
@@ -296,7 +276,7 @@ impl JobManager {
         "#,
         )
         .bind(&job.id.to_string())
-        .bind(retry_count)
+        .bind(retry_count as i32)
         .bind(scheduled_at)
         .execute(&self.db_pool)
         .await
@@ -305,15 +285,15 @@ impl JobManager {
         // Re-enqueue in Redis with scheduled time
         if let Some(client) = &self.redis_pool {
             if let Ok(mut conn) = client.get_redis_client().await {
-                // Remove from processing queue first
-                let processing_jobs: Vec<String> = conn
-                    .zrange("Stackduck:processing", 0, -1)
+                // Remove from running queue first
+                let running_jobs: Vec<String> = conn
+                    .zrange("Stackduck:running", 0, -1)
                     .await
                     .unwrap_or_default();
 
-                for entry in processing_jobs {
-                    if entry.starts_with(&format!("{}:", job.id)) {
-                        let _: Result<i32, _> = conn.zrem("Stackduck:processing", &entry).await;
+                for entry in running_jobs {
+                    if entry.starts_with(&format!("{}:", job.id.to_string())) {
+                        let _: () = conn.zrem("Stackduck:running", &entry).await?;
                         break;
                     }
                 }
@@ -323,24 +303,55 @@ impl JobManager {
                 let job_json = serde_json::to_string(&job)?;
                 let score = scheduled_at.timestamp() as f64;
 
-                let _: Result<i32, _> = conn.zadd(&queue_key, score, &job_json).await;
+                let _: Result<i32, _> = conn.zadd(&queue_key, &job_json, score).await;
 
                 // Update job cache
                 let cache_key = format!("Stackduck:job:{}", job.id);
-                let _: Result<String, _> = conn.setex(&cache_key, 3600, &job_json).await;
+                let _: Result<String, _> = conn.set_ex(&cache_key, &job_json, 3600).await;
             }
         }
 
-        //notification systems
+        //notification
 
         Ok(())
     }
 
-
-
-
-
     // HELPER METHODS
+    pub async fn update_dequeue_job_status(
+        &self,
+        job_id: &str,
+        new_status: JobStatus,
+    ) -> Result<(), StackDuckError> {
+        // 1. Update Postgres
+        sqlx::query(
+            "UPDATE jobs SET status = $1, started_at = NOW(), updated_at = NOW() WHERE id = $2",
+        )
+        .bind(&new_status.to_string())
+        .bind(job_id)
+        .execute(&self.db_pool)
+        .await
+        .map_err(|e| {
+            StackDuckError::JobError(format!("Failed to update job status in Postgres: {}", e))
+        })?;
+
+        // 2. Update in Redis cache if available
+        if let Some(pool) = &self.redis_pool {
+            if let Ok(mut conn) = pool.get_redis_client().await {
+                let updated_time = Utc::now().to_rfc3339();
+                self.update_redis_job_property(
+                    &mut conn,
+                    job_id.to_string(),
+                    &[
+                        ("status".to_string(), new_status.to_string()),
+                        ("updated_at".to_string(), updated_time),
+                    ],
+                )
+                .await?;
+            }
+        }
+
+        Ok(())
+    }
 
     async fn handle_nack_and_retry(&self, job_id: &str, job: &Job) -> Result<(), StackDuckError> {
         // Update in Postgres with failed status and failed_at timestamp
@@ -361,14 +372,23 @@ impl JobManager {
                 let running_jobs: Vec<String> = conn
                     .zrange("Stackduck:running", 0, -1)
                     .await
-                    .map_err(|e| StackDuckError::RedisJobError(e.to_string()))?;
-                let _: () = conn.zrem("Stackduck:running", &job_id).await?;
+                    .map_err(|e| StackDuckError::RedisJobError(e))?;
+                for entry in running_jobs {
+                    if entry.starts_with(&format!("{}:", job_id)) {
+                        let _: () = conn.zrem("Stackduck:running", &entry).await?;
+                        break;
+                    }
+                }
 
+                let job_clone = job.clone();
+                let error_message = job_clone
+                    .error_message
+                    .unwrap_or("No error message".to_string());
 
                 let reason = format!(
                     "Max retries ({}) exceeded with error: {}",
-                    max_retries,
-                    job.error_message.unwrap_or("No error message".to_string())
+                    job.max_retries.unwrap_or(0),
+                    error_message
                 );
 
                 // Create dead letter queue entry with full context
@@ -378,6 +398,7 @@ impl JobManager {
                     "payload": job.payload,
                     "retry_count": job.retry_count.unwrap_or(0),
                     "max_retries": job.max_retries.unwrap_or(3),
+                    "delay": job.delay.unwrap_or(30),
                     "failed_at": chrono::Utc::now().to_rfc3339(),
                     "original_created_at": job.created_at.map(|dt| dt.to_rfc3339()),
                     "reason": reason
@@ -393,12 +414,12 @@ impl JobManager {
 
                 // Update job status in Redis cache if it exists
                 let updates = vec![
-                    ("status", "failed".to_string()),
-                    ("failed_at", chrono::Utc::now().to_rfc3339()),
-                    ("updated_at", chrono::Utc::now().to_rfc3339()),
+                    ("status".to_string(), JobStatus::Failed.to_string()),
+                    ("failed_at".to_string(), chrono::Utc::now().to_rfc3339()),
+                    ("updated_at".to_string(), chrono::Utc::now().to_rfc3339()),
                 ];
                 let _ = self
-                    .update_redis_job_property(&mut conn, job_id, &updates)
+                    .update_redis_job_property(&mut conn, job_id.to_string(), &updates)
                     .await;
             }
         }
@@ -406,31 +427,61 @@ impl JobManager {
         Ok(())
     }
 
-
     pub async fn update_redis_job_property(
         &self,
-        mut conn: Connection,
-        job_id: &str,
-        values: &[(&str, String)],
-    ) -> Result<(), StackDuckError> {
-        let key = format!("Stackduck:job:{}", job_id);
-        conn.hset_multiple::<_, _, _, ()>(&key, values)
-            .await
-            .map_err(|e| StackDuckError::RedisJobError((e)))
-    }
-
-    pub async fn get_redis_job_value(
-        &self,
         conn: &mut Connection,
-        job_id: Uuid,
-        field: &str,
-    ) -> Result<Option<String>, StackDuckError> {
-        let key = format!("Stackduck:job:{}", job_id);
-        let value: Option<String> = conn
-            .hget(&key, field)
+        job_id: String,
+        values: &[(String, String)],
+    ) -> Result<Job, StackDuckError> {
+        let cache_key = format!("Stackduck:job:{}", job_id);
+
+        // Fetch current job JSON from Redis
+        let job_json: Option<String> = conn
+            .get(&cache_key)
             .await
-            .map_err(StackDuckError::RedisJobError)?;
-        Ok(value)
+            .map_err(|e| StackDuckError::RedisJobError(e))?;
+
+        let mut job: Job = match job_json {
+            Some(json_str) => serde_json::from_str(&json_str).map_err(|e| {
+                StackDuckError::JobError(format!("Failed to parse Job JSON: {}", e))
+            })?,
+            None => {
+                return Err(StackDuckError::JobError(format!(
+                    "Job {} not found",
+                    job_id
+                )));
+            }
+        };
+
+        // Convert Job to serde_json::Value to apply updates
+        let mut job_value = serde_json::to_value(job).map_err(|e| {
+            StackDuckError::JobError(format!("Failed to convert Job to Value: {}", e))
+        })?;
+
+        let obj = job_value.as_object_mut().ok_or_else(|| {
+            StackDuckError::JobError("Failed to convert Job JSON to object".to_string())
+        })?;
+
+        // Apply field updates
+        for (key, value) in values {
+            obj.insert(key.to_string(), serde_json::Value::String(value.clone()));
+        }
+
+        // Deserialize back to Job
+        job = serde_json::from_value(job_value).map_err(|e| {
+            StackDuckError::JobError(format!("Failed to re-parse updated Job: {}", e))
+        })?;
+
+        // Store back in Redis with TTL (e.g., 1 hour = 3600 seconds)
+        let new_job_json = serde_json::to_string(&job).map_err(|e| {
+            StackDuckError::JobError(format!("Failed to serialize updated Job: {}", e))
+        })?;
+
+        let _: () = conn
+            .set_ex(&cache_key, new_job_json, 3600)
+            .await
+            .map_err(|e| StackDuckError::RedisJobError(e))?;
+        Ok(job)
     }
 
     pub async fn get_job_by_id(&self, job_id: &str) -> Result<Option<Job>, StackDuckError> {
@@ -438,7 +489,7 @@ impl JobManager {
         if let Some(client) = &self.redis_pool {
             if let Ok(mut conn) = client.get_redis_client().await {
                 let cache_key = format!("Stackduck:job:{}", job_id);
-                if let Ok(Some(job_json)) = conn.get::<String, Option<String>>(&cache_key).await {
+                if let Ok(Some(job_json)) = conn.get::<String, Option<String>>(cache_key).await {
                     if let Ok(job) = serde_json::from_str::<Job>(&job_json) {
                         return Ok(Some(job));
                     }
@@ -459,7 +510,7 @@ impl JobManager {
                 if let Ok(mut conn) = client.get_redis_client().await {
                     let cache_key = format!("Stackduck:job:{}", job_id);
                     let job_json = serde_json::to_string(job).unwrap_or_default();
-                    let _: Result<String, _> = conn.setex(&cache_key, 3600, &job_json).await; // Cache for 1 hour
+                    let _: Result<String, _> = conn.set_ex(&cache_key, &job_json, 3600).await; // Cache for 1 hour
                 }
             }
         }
@@ -467,52 +518,7 @@ impl JobManager {
         Ok(job)
     }
 
-    // pub async fn cache_job_as_hash(mut conn: Connection, job: &Job) -> Result<(), StackDuckError> {
-    //     let key = format!("Stackduck:job:{}", job.id);
-
-    //     let mut fields = vec![
-    //         ("id", job.id.to_string()),
-    //         ("job_type", job.job_type.clone()),
-    //         ("status", job.status.clone()),
-    //         ("payload", job.payload.to_string()),
-    //     ];
-
-    //     if let Some(priority) = job.priority {
-    //         fields.push(("priority", priority.to_string()));
-    //     }
-    //     if let Some(retries) = job.retry_count {
-    //         fields.push(("retry_count", retries.to_string()));
-    //     }
-    //     if let Some(max) = job.max_retries {
-    //         fields.push(("max_retries", max.to_string()));
-    //     }
-    //     if let Some(t) = job.scheduled_at {
-    //         fields.push(("scheduled_at", t.to_rfc3339()));
-    //     }
-    //     if let Some(t) = job.started_at {
-    //         fields.push(("started_at", t.to_rfc3339()));
-    //     }
-    //     if let Some(t) = job.completed_at {
-    //         fields.push(("completed_at", t.to_rfc3339()));
-    //     }
-    //     if let Some(t) = job.created_at {
-    //         fields.push(("created_at", t.to_rfc3339()));
-    //     }
-    //     if let Some(t) = job.updated_at {
-    //         fields.push(("updated_at", t.to_rfc3339()));
-    //     }
-
-    //     // Use HSET with tuple iterator
-    //     conn.hset_multiple(&key, &fields)
-    //         .await
-    //         .map_err(|e| StackDuckError::RedisJobError((e)))
-    // }
-
-    pub async fn update_postgres_dequeue_fallback(
-        &self,
-        mut job: Job,
-        queue_name: &str,
-    ) -> Option<Job> {
+    pub async fn update_postgres_dequeue_fallback(&self, queue_name: &str) -> Option<Job> {
         // Fallback to Postgres query with atomic status update
         let job = sqlx::query_as::<_, Job>(
             r#"
@@ -535,9 +541,16 @@ impl JobManager {
         .bind(queue_name)
         .fetch_optional(&self.db_pool)
         .await
-        .map_err(|e| StackDuckError::JobError(format!("Postgres query failed: {}", e)))?;
+        .map_err(|e| StackDuckError::JobError(format!("Postgres query failed: {}", e)));
 
-        job
+        match job {
+            Ok(Some(job)) => Some(job),
+            Ok(None) => None,
+            Err(e) => {
+                eprintln!("Failed to fetch job from Postgres: {}", e);
+                None
+            }
+        }
     }
 
     fn fallback_to_memory(&self, queue_key: &str, job: Job) -> Result<(), StackDuckError> {

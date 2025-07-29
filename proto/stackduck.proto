@@ -1,0 +1,74 @@
+syntax = "proto3";
+
+package job_queue;
+
+service JobQueueService {
+  // Producer endpoints
+  rpc EnqueueJob(EnqueueJobRequest) returns (EnqueueJobResponse);
+  
+  // Consumer endpoints  
+  rpc ConsumeJobs(ConsumeJobsRequest) returns (stream JobMessage);
+  rpc CompleteJob(CompleteJobRequest) returns (CompleteJobResponse);
+  rpc FailJob(FailJobRequest) returns (FailJobResponse);
+}
+
+// Request/Response messages
+message EnqueueJobRequest {
+  string job_type = 1;
+  string payload = 2;
+  int32 priority = 3;
+  int32 delay = 4;
+  int32 max_retries = 5;
+  int32 retry_count = 6;
+  int64 scheduled_at = 7;
+}
+
+message EnqueueJobResponse {
+  string job_id = 1;
+  bool success = 2;
+  string error_message = 3;
+}
+
+message ConsumeJobsRequest {
+  string worker_id = 1;
+  repeated string job_types = 2;
+}
+
+message JobMessage {
+  Job job = 1;
+  string notification_type = 2;
+}
+
+message Job {
+  string id = 1;
+  string job_type = 2;
+  string payload = 3;
+  string status = 4;
+  int32 priority = 5;
+  int32 retry_count = 6;
+  int32 max_retries = 7;
+  string error_message = 8;
+  int32 delay = 9;
+  int64 scheduled_at = 10;
+  int64 started_at = 11;
+  int64 completed_at = 12;
+  int64 created_at = 13;
+  int64 updated_at = 14;
+}
+
+message CompleteJobRequest {
+  string job_id = 1;
+}
+
+message CompleteJobResponse {
+  bool success = 1;
+}
+
+message FailJobRequest {
+  string job_id = 1;
+  string error_message = 2;
+}
+
+message FailJobResponse {
+  bool success = 1;
+}

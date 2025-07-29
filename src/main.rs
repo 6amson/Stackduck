@@ -2,7 +2,9 @@ pub mod db;
 pub mod error;
 pub mod job;
 pub mod types;
-pub mod queue;
+// pub mod stackduck {
+//     tonic::include_proto!("stackduck");
+// };
 
 use crate::db::postgres::{DbPool, connect_to_db};
 use crate::db::redis::connect_to_redis;

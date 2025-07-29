@@ -6,7 +6,8 @@ CREATE TABLE IF NOT EXISTS jobs (
     job_type VARCHAR(255) NOT NULL,
     payload JSONB NOT NULL,
     status VARCHAR(50) NOT NULL DEFAULT 'queued',
-    priority INTEGER DEFAULT 0,
+    priority INTEGER DEFAULT 2,
+    delay INTEGER DEFAULT 0,
     retry_count INTEGER DEFAULT 0,
     max_retries INTEGER DEFAULT 3,
     scheduled_at TIMESTAMPTZ,
@@ -16,10 +17,12 @@ CREATE TABLE IF NOT EXISTS jobs (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+ALTER TABLE jobs ADD CONSTRAINT priority_range CHECK (priority BETWEEN 1 AND 3);
+
 -- Create indexes for better performance
 CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
 CREATE INDEX IF NOT EXISTS idx_jobs_job_type ON jobs(job_type);
-CREATE INDEX IF NOT EXISTS idx_jobs_queue ON jobs(queue);
+CREATE INDEX IF NOT EXISTS idx_jobs_priority ON jobs(priority);
 CREATE INDEX IF NOT EXISTS idx_jobs_created_at ON jobs(created_at);
 CREATE INDEX IF NOT EXISTS idx_jobs_scheduled_at ON jobs(scheduled_at) WHERE scheduled_at IS NOT NULL;
 

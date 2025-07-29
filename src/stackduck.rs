@@ -2,20 +2,22 @@ use crate::types::Job;
 use crate::types::JobManager;
 use crate::types::JobNotification;
 use crate::types::NotificationType;
+use async_stream::stream;
 use chrono::{DateTime, Utc};
+use futures::stream::{StreamExt, select_all};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::sync::broadcast;
-// use tokio_stream::wrappers::TcpListenerStream;
+use tokio_stream::wrappers::BroadcastStream;
 use tonic::{Request, Response, Status, transport::Server};
 
-pub struct JobQueueGrpcService {
+pub struct StackduckGrpcService {
     job_manager: Arc<JobManager>,
     job_notifiers: Arc<Mutex<HashMap<String, broadcast::Sender<JobNotification>>>>,
 }
 
-impl JobQueueGrpcService {
+impl StackduckGrpcService {
     pub fn new(job_manager: Arc<JobManager>) -> Self {
         Self {
             job_manager,
@@ -35,7 +37,7 @@ impl JobQueueGrpcService {
         }
     }
 
-    // Convert your Job struct to gRPC Job message
+    // Convert Job struct to gRPC Job message
     fn job_to_grpc(job: Job) -> Job {
         Job {
             id: job.id.to_string(),
@@ -54,10 +56,32 @@ impl JobQueueGrpcService {
             updated_at: job.updated_at.map(|dt| dt.timestamp()),
         }
     }
+
+    fn merge_notification_receivers(
+        receivers: Vec<broadcast::Receiver<JobNotification>>,
+    ) -> impl Stream<Item = Result<JobNotification, broadcast::error::RecvError>> {
+        let streams = receivers
+            .into_iter()
+            .map(|rx| {
+                BroadcastStream::new(rx).map(|result| {
+                    match result {
+                        Ok(notification) => Ok(notification),
+                        Err(e) => {
+                            // Log lagged messages or other errors
+                            eprintln!("Receiver error: {:?}", e);
+                            Err(e)
+                        }
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+
+        select_all(streams)
+    }
 }
 
 #[tonic::async_trait]
-impl JobQueueService for JobQueueGrpcService {
+impl StackduckService for StackduckGrpcService {
     async fn enqueue_job(
         &self,
         request: Request<job_queue::EnqueueJobRequest>,
@@ -68,25 +92,59 @@ impl JobQueueService for JobQueueGrpcService {
         let payload: serde_json::Value = serde_json::from_str(&req.payload)
             .map_err(|e| Status::invalid_argument(format!("Invalid JSON payload: {}", e)))?;
 
-        // Create job using your existing constructor
-        let mut job = crate::Job::new(req.job_type.clone(), payload);
+        // Validate and default priority in enqueue
+        let priority = match req.priority {
+            Some(p) if (1..=3).contains(&p) => Some(p),
+            Some(invalid) => {
+                eprintln!("Invalid priority {}, defaulting to 2", invalid);
+                Some(2) // Default to normal priority
+            }
+            None => Some(2), // Default to normal priority
+        };
 
-        // Set optional fields
-        if let Some(priority) = req.priority {
-            job.priority = Some(priority);
-        }
-        if let Some(max_retries) = req.max_retries {
-            job.max_retries = Some(max_retries);
-        }
-        if let Some(scheduled_timestamp) = req.scheduled_at {
-            job.scheduled_at = Some(DateTime::from_timestamp(scheduled_timestamp, 0).unwrap());
-        }
+        let retry_count = match req.retry_count {
+            Some(p) if (1..=4).contains(&p) => Some(p),
+            Some(_) => {
+                eprintln!("Invalid retry count {}, defaulting to 0", req.retry_count);
+                Some(0)
+            }
+            None => Some(0),
+        };
 
-        // USE YOUR EXISTING ENQUEUE METHOD
+        let max_retries = match req.max_retries {
+            Some(p) if (1..=4).contains(&p) => Some(p),
+            Some(_) => {
+                eprintln!("Invalid max retries {}, defaulting to 2", req.max_retries);
+                Some(2)
+            }
+            None => Some(0),
+        };
+
+        let delay = match req.delay {
+            Some(p) if (1..=3600).contains(&p) => Some(p),
+            Some(_) => {
+                eprintln!("Invalid delay {}, defaulting to 30 seconds", req.delay);
+                Some(30)
+            }
+            None => Some(0),
+        };
+
+        // Create job using existing constructor
+        let mut job = Job::new(
+            req.job_type.clone(),
+            payload,
+            priority,
+            delay,
+            max_retries,
+            retry_count,
+        );
+
+        // USE EXISTING ENQUEUE METHOD
         match self.job_manager.enqueue(job).await {
             Ok(enqueued_job) => {
                 // After successful enqueue, notify workers
-                self.notify_workers(&req.job_type, "NEW_JOB").await;
+                self.notify_workers(&req.job_type, NotificationType::NewJob)
+                    .await;
 
                 Ok(Response::new(job_queue::EnqueueJobResponse {
                     job_id: enqueued_job.id.to_string(),
@@ -108,8 +166,8 @@ impl JobQueueService for JobQueueGrpcService {
     ) -> Result<Response<job_queue::DequeueJobResponse>, Status> {
         let req = request.into_inner();
 
-        // USE YOUR EXISTING DEQUEUE METHOD
-        // Your dequeue checks Redis -> InMemory -> Postgres in that order
+        // USE EXISTING DEQUEUE METHOD
+        // dequeue checks Redis -> InMemory -> Postgres in that order
         match self.job_manager.dequeue(&req.queue_name).await {
             Ok(Some(job)) => Ok(Response::new(job_queue::DequeueJobResponse {
                 job: Some(Self::job_to_grpc(&job)),
@@ -123,7 +181,8 @@ impl JobQueueService for JobQueueGrpcService {
         }
     }
 
-    type ConsumeJobsStream = tokio_stream::wrappers::BroadcastStream<JobNotification>;
+    type ConsumeJobsStream =
+        Pin<Box<dyn Stream<Item = Result<job_queue::JobMessage, Status>> + Send>>;
 
     async fn consume_jobs(
         &self,
@@ -152,36 +211,59 @@ impl JobQueueService for JobQueueGrpcService {
         let job_types = req.job_types.clone();
 
         let stream = async_stream::stream! {
-            // First, check for existing jobs in all requested queues
-            for job_type in &job_types {
-                while let Ok(Some(job)) = job_manager.dequeue(job_type).await {
+                    // First, check for existing jobs in all requested queues
+                    for job_type in &job_types {
+                        while let Ok(Some(job)) = job_manager.dequeue(job_type).await {
+                            yield Ok(job_queue::JobMessage {
+                                job: Some(Self::job_to_grpc(&job)),
+                                notification_type: NotificationType::ExistingJob.to_string(),
+                            });
+                        }
+                    }
+
+                    // Then listen for new job notifications
+                    let mut merged_receivers = Self::merge_notification_receivers(all_receivers);
+
+        while let Some(notification_result) = merged_receivers.next().await {
+            let notification = match notification_result {
+                Ok(notification) => notification,
+                Err(broadcast::error::RecvError::Lagged(count)) => {
+                    tracing::warn!("Missed {} notifications due to lag", count);
+                    continue; // Skip this iteration but keep processing
+                }
+                Err(broadcast::error::RecvError::Closed) => {
+                    tracing::info!("A notification receiver closed");
+                    continue; // Other receivers might still be active
+                }
+            };
+
+            // Process the notification
+            match job_manager.dequeue(&notification.job_type).await {
+                Ok(Some(job)) => {
                     yield Ok(job_queue::JobMessage {
                         job: Some(Self::job_to_grpc(&job)),
-                        notification_type: "EXISTING_JOB".to_string(),
+                        notification_type: notification.notification_type,
                     });
                 }
-            }
-
-            // Then listen for new job notifications
-            let mut merged_receivers = Self::merge_notification_receivers(all_receivers);
-
-            while let Some(notification_result) = merged_receivers.recv().await {
-                if let Ok(notification) = notification_result {
-                    // When notified about a job, try to dequeue from that specific queue
-                    if let Ok(Some(job)) = job_manager.dequeue(&notification.job_type).await {
-                        yield Ok(job_queue::JobMessage {
-                            job: Some(Self::job_to_grpc(&job)),
-                            notification_type: notification.notification_type,
-                        });
-                    }
+                Ok(None) => {
+                    // Job was already taken by another worker - normal in distributed systems
+                    tracing::trace!("Job already processed for type: {}", notification.job_type);
+                }
+                Err(e) => {
+                    tracing::error!("Dequeue failed for {}: {:?}", notification.job_type, e);
+                    // Decide: yield error or continue
+                    yield Err(e.into());
                 }
             }
-        };
+        }
+
+            };
 
         println!(
             "Worker {} subscribed to job types: {:?}",
             worker_id, job_types
         );
+
         Ok(Response::new(Box::pin(stream)))
     }
 
@@ -192,7 +274,7 @@ impl JobQueueService for JobQueueGrpcService {
         let req = request.into_inner();
 
         // USE YOUR EXISTING METHOD
-        match self.job_manager.mark_job_completed(&req.job_id).await {
+        match self.job_manager.ack_job(&req.job_id).await {
             Ok(_) => Ok(Response::new(job_queue::CompleteJobResponse {
                 success: true,
             })),
@@ -212,7 +294,11 @@ impl JobQueueService for JobQueueGrpcService {
         let req = request.into_inner();
 
         // USE YOUR EXISTING METHOD
-        match self.job_manager.mark_job_failed(&req.job_id, &req.error_message).await {
+        match self
+            .job_manager
+            .nack_job(&req.job_id, &req.error_message)
+            .await
+        {
             Ok(_) => Ok(Response::new(job_queue::FailJobResponse { success: true })),
             Err(e) => {
                 println!("Failed to mark job {} as failed: {}", req.job_id, e);
@@ -232,7 +318,8 @@ impl JobQueueService for JobQueueGrpcService {
             Ok(_) => {
                 // After retry, notify workers (job is re-enqueued)
                 if let Ok(Some(job)) = self.job_manager.get_job_by_id(&req.job_id).await {
-                    self.notify_workers(&job.job_type, "RETRY_JOB").await;
+                    self.notify_workers(&job.job_type, NotificationType::RetryJob)
+                        .await;
                 }
                 Ok(Response::new(job_queue::RetryJobResponse { success: true }))
             }
@@ -243,16 +330,5 @@ impl JobQueueService for JobQueueGrpcService {
                 }))
             }
         }
-    }
-}
-
-impl JobQueueGrpcService {
-    // Helper to merge multiple broadcast receivers
-    fn merge_notification_receivers(
-        receivers: Vec<broadcast::Receiver<JobNotification>>,
-    ) -> broadcast::Receiver<JobNotification> {
-        // For simplicity, just return the first receiver
-        // In production, you'd want to properly merge all receivers
-        receivers.into_iter().next().unwrap()
     }
 }
