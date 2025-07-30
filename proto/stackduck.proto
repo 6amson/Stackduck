@@ -1,8 +1,8 @@
 syntax = "proto3";
 
-package job_queue;
+package stackduck;
 
-service JobQueueService {
+service StackDuckService {
   // Producer endpoints
   rpc EnqueueJob(EnqueueJobRequest) returns (EnqueueJobResponse);
   

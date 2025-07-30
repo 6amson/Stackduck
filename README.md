@@ -18,22 +18,63 @@ A fast, lightweight distributed task queue system built in **Rust** using **gRPC
 ## 🛠️ Architecture Overview
 
 ```text
-Client (NestJS / Flask / CLI / etc)
+Producers (Framework Agnostic)
+    NestJS | Flask | Ruby | CLI | etc
          |
+         | gRPC Job Submission.
          v
-   +-------------+
-   | StackDuck gRPC API (Rust)
-   +-------------+
+   +---------------------------+
+   | StackDuck gRPC API (Rust) |
+   | - async-stream support    |
+   | - Job validation          |
+   +---------------------------+
          |
+         | Enqueue + Persist
          v
-+------------------------+
-| Redis Queue / In-Mem   |  ---> Optional fallback queue
-+------------------------+
++---------------------------+    +---------------------------+
+| Redis Queue               |    | PostgreSQL                |
+| - Job queue               |    | - Job metadata            |
+| - Priority queues         |    | - Execution state         |
+| - Rate limiting           |    | - Worker assignments      |
++---------------------------+    +---------------------------+
+         |                              
+         | Notification Emit            
+         v                              
+   +---------------------------+        
+   | StackDuck gRPC API (Rust) |        
+   | - Job ready notifications |        
+   | - Worker selection        |        
+   +---------------------------+        
+         |                             
+         | async-stream job distribution 
+         v                              
++------------------------------------------------------------+
+|          Workers/Consumers (Multi-Framework)               |
+|                      Job Execution                         |
+|                Job Ack and Job Nack calls                  |
+|  +------------+ +------------+ +------------+ +----------+ |
+|  | Ruby       | | NestJS     | | Flask      | | Rust     | |
+|  | Worker     | | Worker     | | Worker     | | Worker   | |
+|  | (gRPC)     | | (gRPC)     | | (gRPC)     | | (Native) | |
+|  +------------+ +------------+ +------------+ +----------+ |
++-------------------------------------------------------------+
          |
+         | Job Ack or Job Nack
          v
-   +-------------+
-   |  Worker(s)  |  <-- Can be Rust or Node-based workers
-   +-------------+
++-----------------------------------------+
+| StackDuck gRPC API (Rust)               |
+| - On Nack (Handles retries)             |
+| - On Ack (Marks job as complete)        |
+| - On Error (Marks job as failed)        |
+| - On failure (Moves job to dead-letter) |
++-----------------------------------------+
          |
+         | Stream Results
          v
-  Job execution + Result persistence (Postgres)
+   +--------------------------------------+
+   |  Consumers/Workers                   |
+   | - Polls result for dead-letter queue |
+   | - Handle dead letter jobs            |
+   | - Log failed jobs                    |
+   +--------------------------------------+
+```
