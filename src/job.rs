@@ -1,5 +1,4 @@
 use crate::{
-    db::postgres::DbPool,
     error::StackDuckError,
     types::{Job, JobManager, JobStatus},
 };
@@ -98,7 +97,7 @@ impl JobManager {
         }
 
         // Fallback to in-memory
-        self.fallback_to_memory(&queue_key, inserted_job.clone())?;
+        let _ = self.fallback_to_memory(&queue_key, inserted_job.clone()).await;
 
         // If both fail, the job is persisted but not actively queued
         // It will be picked up by the Postgres fallback in dequeue
@@ -160,17 +159,17 @@ impl JobManager {
         }
 
         // Try in-memory queue
-        if let Ok(mut queues) = self.in_memory_queue.lock() {
-            if let Some(queue) = queues.get_mut(&key) {
-                if let Some(job) = queue.pop_front() {
-                    // Update status to processing
-                    self.update_dequeue_job_status(&job.id.to_string(), JobStatus::Running)
-                        .await?;
-                    return Ok(Some(job));
-                }
+        let mut queues = self.in_memory_queue.lock().await;
+        if let Some(queue) = queues.get_mut(&key) {
+            if let Some(job) = queue.pop_front() {
+                // Drop the lock before the async operation
+                drop(queues);
+
+                // Update status to processing
+                self.update_dequeue_job_status(&job.id.to_string(), JobStatus::Running)
+                    .await?;
+                return Ok(Some(job));
             }
-        } else {
-            eprintln!("Failed to acquire lock on in-memory queue");
         }
 
         let job = self.update_postgres_dequeue_fallback(queue_name).await;
@@ -310,8 +309,6 @@ impl JobManager {
                 let _: Result<String, _> = conn.set_ex(&cache_key, &job_json, 3600).await;
             }
         }
-
-        //notification
 
         Ok(())
     }
@@ -553,11 +550,11 @@ impl JobManager {
         }
     }
 
-    fn fallback_to_memory(&self, queue_key: &str, job: Job) -> Result<(), StackDuckError> {
+    async fn fallback_to_memory(&self, queue_key: &str, job: Job) -> Result<(), StackDuckError> {
         let mut queues = self
             .in_memory_queue
             .lock()
-            .map_err(|e| StackDuckError::JobError(format!("In-memory queue lock error: {}", e)))?;
+            .await;
 
         queues
             .entry(queue_key.to_string())

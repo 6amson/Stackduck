@@ -1,27 +1,19 @@
-use crate::stackduck;
-use crate::types::Job;
-use crate::types::JobManager;
-use crate::types::JobNotification;
-use crate::types::NotificationType;
-use async_stream::stream;
-use chrono::{DateTime, Utc};
-use futures::stream::{StreamExt, select_all};
+use crate::stackduck::stack_duck_service_server::StackDuckService;
+use crate::stackduck::{
+    CompleteJobRequest, CompleteJobResponse, ConsumeJobsRequest, DequeueJobRequest,
+    DequeueJobResponse, EnqueueJobRequest, EnqueueJobResponse, FailJobRequest, FailJobResponse,
+    GrpcJob, JobMessage, RetryJobRequest, RetryJobResponse,
+};
+use crate::types::{Job, JobManager, JobNotification, NotificationType};
+use futures::stream::{select_all};
 use std::collections::HashMap;
+use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::sync::broadcast;
-use tokio_stream::wrappers::BroadcastStream;
-use tonic::{Request, Response, Status, transport::Server};
-use crate::stackduck::{
-    EnqueueJobRequest, EnqueueJobResponse,
-    ConsumeJobsRequest, JobMessage,
-    CompleteJobRequest, CompleteJobResponse,
-    FailJobRequest, FailJobResponse,
-}
-// {
-//     StackDuckService,
-
-// };
+use tokio_stream::{Stream, StreamExt};
+use tokio_stream::wrappers::{BroadcastStream, errors::BroadcastStreamRecvError};
+use tonic::{Request, Response, Status};
 
 pub struct StackduckGrpcService {
     job_manager: Arc<JobManager>,
@@ -42,45 +34,51 @@ impl StackduckGrpcService {
         if let Some(sender) = notifiers.get(job_type) {
             let notification = JobNotification {
                 job_type: job_type.to_string(),
-                notification_type: notification_type.to_string(),
+                notification_type,
             };
             let _ = sender.send(notification);
         }
     }
 
     // Convert Job struct to gRPC Job message
-    fn job_to_grpc(job: Job) -> Job {
-        Job {
+    fn job_to_grpc(job: Job) -> GrpcJob {
+        GrpcJob {
             id: job.id.to_string(),
-            job_type: job.job_type.clone(),
+            job_type: job.job_type,
             payload: job.payload.to_string(),
-            status: job.status.clone(),
-            priority: job.priority,
-            retry_count: job.retry_count,
-            max_retries: job.max_retries,
-            error_message: job.error_message,
-            delay: job.delay,
-            scheduled_at: job.scheduled_at.map(|dt| dt.timestamp()),
-            started_at: job.started_at.map(|dt| dt.timestamp()),
-            completed_at: job.completed_at.map(|dt| dt.timestamp()),
-            created_at: job.created_at.map(|dt| dt.timestamp()),
-            updated_at: job.updated_at.map(|dt| dt.timestamp()),
+            status: job.status,
+            priority: job.priority.unwrap_or_default(),
+            retry_count: job.retry_count.unwrap_or_default(),
+            max_retries: job.max_retries.unwrap_or_default(),
+            error_message: job.error_message.unwrap_or_default(),
+            delay: job.delay.unwrap_or_default(),
+            scheduled_at: job
+                .scheduled_at
+                .map(|dt| dt.timestamp())
+                .unwrap_or_default(),
+            started_at: job.started_at.map(|dt| dt.timestamp()).unwrap_or_default(),
+            completed_at: job
+                .completed_at
+                .map(|dt| dt.timestamp())
+                .unwrap_or_default(),
+            created_at: job.created_at.map(|dt| dt.timestamp()).unwrap_or_default(),
+            updated_at: job.updated_at.map(|dt| dt.timestamp()).unwrap_or_default(),
         }
     }
 
     fn merge_notification_receivers(
         receivers: Vec<broadcast::Receiver<JobNotification>>,
-    ) -> impl Stream<Item = Result<JobNotification, broadcast::error::RecvError>> {
+    ) -> impl Stream<Item = JobNotification> {
         let streams = receivers
             .into_iter()
             .map(|rx| {
-                BroadcastStream::new(rx).map(|result| {
+                BroadcastStream::new(rx).filter_map(|result| {
+                    // Sync closure, no async needed
                     match result {
-                        Ok(notification) => Ok(notification),
-                        Err(e) => {
-                            // Log lagged messages or other errors
-                            eprintln!("Receiver error: {:?}", e);
-                            Err(e)
+                        Ok(notification) => Some(notification),
+                        Err(BroadcastStreamRecvError::Lagged(n)) => {
+                            eprintln!("Receiver lagged by {} messages, skipping", n);
+                            None
                         }
                     }
                 })
@@ -95,8 +93,8 @@ impl StackduckGrpcService {
 impl StackDuckService for StackduckGrpcService {
     async fn enqueue_job(
         &self,
-        request: Request<stackduck::EnqueueJobRequest>,
-    ) -> Result<Response<stackduck::EnqueueJobResponse>, Status> {
+        request: Request<EnqueueJobRequest>,
+    ) -> Result<Response<EnqueueJobResponse>, Status> {
         let req = request.into_inner();
 
         // Parse payload JSON
@@ -104,50 +102,42 @@ impl StackDuckService for StackduckGrpcService {
             .map_err(|e| Status::invalid_argument(format!("Invalid JSON payload: {}", e)))?;
 
         // Validate and default priority in enqueue
-        let priority = match req.priority {
-            Some(p) if (1..=3).contains(&p) => Some(p),
-            Some(invalid) => {
-                eprintln!("Invalid priority {}, defaulting to 2", invalid);
-                Some(2) // Default to normal priority
-            }
-            None => Some(2), // Default to normal priority
+        let priority = if (1..=3).contains(&req.priority) {
+            req.priority
+        } else {
+            eprintln!("Invalid priority {}, defaulting to 2", req.priority);
+            2
         };
 
-        let retry_count = match req.retry_count {
-            Some(p) if (1..=4).contains(&p) => Some(p),
-            Some(_) => {
-                eprintln!("Invalid retry count {}, defaulting to 0", req.retry_count);
-                Some(0)
-            }
-            None => Some(0),
+        let retry_count = if (0..=4).contains(&req.retry_count) {
+            req.retry_count
+        } else {
+            eprintln!("Invalid retry_count {}, defaulting to 0", req.retry_count);
+            0
         };
 
-        let max_retries = match req.max_retries {
-            Some(p) if (1..=4).contains(&p) => Some(p),
-            Some(_) => {
-                eprintln!("Invalid max retries {}, defaulting to 2", req.max_retries);
-                Some(2)
-            }
-            None => Some(0),
+        let max_retries = if (1..=4).contains(&req.max_retries) {
+            req.max_retries
+        } else {
+            eprintln!("Invalid max_retries {}, defaulting to 2", req.max_retries);
+            2
         };
 
-        let delay = match req.delay {
-            Some(p) if (1..=3600).contains(&p) => Some(p),
-            Some(_) => {
-                eprintln!("Invalid delay {}, defaulting to 30 seconds", req.delay);
-                Some(30)
-            }
-            None => Some(0),
+        let delay = if (1..=3600).contains(&req.delay) {
+            req.delay
+        } else {
+            eprintln!("Invalid delay {}, defaulting to 30 seconds", req.delay);
+            30
         };
 
         // Create job using existing constructor
-        let mut job = Job::new(
+        let job = Job::new(
             req.job_type.clone(),
             payload,
-            priority,
-            delay,
-            max_retries,
-            retry_count,
+            Some(priority),
+            Some(delay),
+            Some(max_retries),
+            Some(retry_count),
         );
 
         // USE EXISTING ENQUEUE METHOD
@@ -157,13 +147,13 @@ impl StackDuckService for StackduckGrpcService {
                 self.notify_workers(&req.job_type, NotificationType::NewJob)
                     .await;
 
-                Ok(Response::new(stackduck::EnqueueJobResponse {
+                Ok(Response::new(EnqueueJobResponse {
                     job_id: enqueued_job.id.to_string(),
                     success: true,
                     error_message: String::new(),
                 }))
             }
-            Err(e) => Ok(Response::new(stackduck::EnqueueJobResponse {
+            Err(e) => Ok(Response::new(EnqueueJobResponse {
                 job_id: String::new(),
                 success: false,
                 error_message: e.to_string(),
@@ -173,31 +163,46 @@ impl StackDuckService for StackduckGrpcService {
 
     async fn dequeue_job(
         &self,
-        request: Request<stackduck::DequeueJobRequest>,
-    ) -> Result<Response<stackduck::DequeueJobResponse>, Status> {
+        request: Request<DequeueJobRequest>,
+    ) -> Result<Response<DequeueJobResponse>, Status> {
         let req = request.into_inner();
 
         // USE EXISTING DEQUEUE METHOD
         // dequeue checks Redis -> InMemory -> Postgres in that order
         match self.job_manager.dequeue(&req.queue_name).await {
-            Ok(Some(job)) => Ok(Response::new(stackduck::DequeueJobResponse {
-                job: Some(Self::job_to_grpc(&job)),
-                success: true,
-            })),
-            Ok(None) => Ok(Response::new(stackduck::DequeueJobResponse {
-                job: None,
-                success: false,
-            })),
-            Err(e) => Err(Status::internal(format!("Dequeue failed: {}", e))),
+            Ok(Some(job)) => {
+                let grpc_job: GrpcJob = StackduckGrpcService::job_to_grpc(job);
+                let response = DequeueJobResponse {
+                    job: Some(grpc_job),
+                    success: true,
+                    error_message: String::new(),
+                };
+                Ok(Response::new(response))
+            }
+            Ok(None) => {
+                let response = DequeueJobResponse {
+                    job: None,
+                    success: true,
+                    error_message: String::new(),
+                };
+                Ok(Response::new(response))
+            }
+            Err(e) => {
+                let response = DequeueJobResponse {
+                    job: None,
+                    success: false,
+                    error_message: e.to_string(),
+                };
+                Ok(Response::new(response))
+            }
         }
     }
 
-    type ConsumeJobsStream =
-        Pin<Box<dyn Stream<Item = Result<stackduck::JobMessage, Status>> + Send>>;
+    type ConsumeJobsStream = Pin<Box<dyn Stream<Item = Result<JobMessage, Status>> + Send>>;
 
     async fn consume_jobs(
         &self,
-        request: Request<stackduck::ConsumeJobsRequest>,
+        request: Request<ConsumeJobsRequest>,
     ) -> Result<Response<Self::ConsumeJobsStream>, Status> {
         let req = request.into_inner();
 
@@ -220,59 +225,53 @@ impl StackDuckService for StackduckGrpcService {
         let job_manager = self.job_manager.clone();
         let worker_id = req.worker_id.clone();
         let job_types = req.job_types.clone();
+        let job_types2 = req.job_types.clone();
+
 
         let stream = async_stream::stream! {
-                    // First, check for existing jobs in all requested queues
-                    for job_type in &job_types {
-                        while let Ok(Some(job)) = job_manager.dequeue(job_type).await {
-                            yield Ok(stackduck::JobMessage {
-                                job: Some(Self::job_to_grpc(&job)),
-                                notification_type: NotificationType::ExistingJob.to_string(),
-                            });
-                        }
-                    }
-
-                    // Then listen for new job notifications
-                    let mut merged_receivers = Self::merge_notification_receivers(all_receivers);
-
-        while let Some(notification_result) = merged_receivers.next().await {
-            let notification = match notification_result {
-                Ok(notification) => notification,
-                Err(broadcast::error::RecvError::Lagged(count)) => {
-                    tracing::warn!("Missed {} notifications due to lag", count);
-                    continue; // Skip this iteration but keep processing
-                }
-                Err(broadcast::error::RecvError::Closed) => {
-                    tracing::info!("A notification receiver closed");
-                    continue; // Other receivers might still be active
-                }
-            };
-
-            // Process the notification
-            match job_manager.dequeue(&notification.job_type).await {
-                Ok(Some(job)) => {
-                    yield Ok(stackduck::JobMessage {
-                        job: Some(Self::job_to_grpc(&job)),
-                        notification_type: notification.notification_type,
+            // First, check for existing jobs in all requested queues
+            for job_type in job_types {
+                while let Ok(Some(job)) = job_manager.dequeue(&job_type).await {
+                    yield Ok(JobMessage {
+                        job: Some(StackduckGrpcService::job_to_grpc(job)),
+                        notification_type: NotificationType::ExistingJob.to_string(), // Add notification_type
                     });
                 }
-                Ok(None) => {
-                    // Job was already taken by another worker - normal in distributed systems
-                    tracing::trace!("Job already processed for type: {}", notification.job_type);
-                }
-                Err(e) => {
-                    tracing::error!("Dequeue failed for {}: {:?}", notification.job_type, e);
-                    // Decide: yield error or continue
-                    yield Err(e.into());
+            }
+
+            // Then listen for new job notifications
+            let mut merged_receivers = Self::merge_notification_receivers(all_receivers);
+
+            while let Some(notification_result) = merged_receivers.next().await {
+                let notification = notification_result;
+
+                // Process the notification
+                match job_manager.dequeue(&notification.job_type).await {
+                    Ok(Some(job)) => {
+                        yield Ok(JobMessage {
+                            job: Some(StackduckGrpcService::job_to_grpc(job)),
+                            notification_type: notification.notification_type.to_string(), // Use the actual notification type
+                        });
+                    }
+                    Ok(None) => {
+                        // Job was already taken by another worker - normal in distributed systems
+                        eprintln!("Job already processed for type: {}", notification.job_type);
+                        // Don't yield anything, just continue
+                    }
+                    Err(e) => {
+                        eprintln!("Dequeue failed for {}: {:?}", notification.job_type, e);
+                        // Yield error instead of using .into() which might not be implemented
+                        yield Err(Status::internal(format!("Dequeue failed: {}", e)));
+                    }
                 }
             }
-        }
+        };
 
-            };
+        let job_tt = job_types2.clone();
 
         println!(
             "Worker {} subscribed to job types: {:?}",
-            worker_id, job_types
+            worker_id, job_tt
         );
 
         Ok(Response::new(Box::pin(stream)))
@@ -280,28 +279,24 @@ impl StackDuckService for StackduckGrpcService {
 
     async fn complete_job(
         &self,
-        request: Request<stackduck::CompleteJobRequest>,
-    ) -> Result<Response<stackduck::CompleteJobResponse>, Status> {
+        request: Request<CompleteJobRequest>,
+    ) -> Result<Response<CompleteJobResponse>, Status> {
         let req = request.into_inner();
 
         // USE YOUR EXISTING METHOD
         match self.job_manager.ack_job(&req.job_id).await {
-            Ok(_) => Ok(Response::new(stackduck::CompleteJobResponse {
-                success: true,
-            })),
+            Ok(_) => Ok(Response::new(CompleteJobResponse { success: true })),
             Err(e) => {
                 println!("Failed to complete job {}: {}", req.job_id, e);
-                Ok(Response::new(stackduck::CompleteJobResponse {
-                    success: false,
-                }))
+                Ok(Response::new(CompleteJobResponse { success: false }))
             }
         }
     }
 
     async fn fail_job(
         &self,
-        request: Request<stackduck::FailJobRequest>,
-    ) -> Result<Response<stackduck::FailJobResponse>, Status> {
+        request: Request<FailJobRequest>,
+    ) -> Result<Response<FailJobResponse>, Status> {
         let req = request.into_inner();
 
         // USE YOUR EXISTING METHOD
@@ -310,35 +305,36 @@ impl StackDuckService for StackduckGrpcService {
             .nack_job(&req.job_id, &req.error_message)
             .await
         {
-            Ok(_) => Ok(Response::new(stackduck::FailJobResponse { success: true })),
+            Ok(_) => Ok(Response::new(FailJobResponse { success: true })),
             Err(e) => {
                 println!("Failed to mark job {} as failed: {}", req.job_id, e);
-                Ok(Response::new(stackduck::FailJobResponse { success: false }))
+                Ok(Response::new(FailJobResponse { success: false }))
             }
         }
     }
 
     async fn retry_job(
         &self,
-        request: Request<stackduck::RetryJobRequest>,
-    ) -> Result<Response<stackduck::RetryJobResponse>, Status> {
+        request: Request<RetryJobRequest>,
+    ) -> Result<Response<RetryJobResponse>, Status> {
         let req = request.into_inner();
+        let job_result = self.job_manager.get_job_by_id(&req.job_id).await;
+        let job_option = job_result.unwrap_or_default();
+        let job = job_option.unwrap();
 
         // USE YOUR EXISTING RETRY METHOD
-        match self.job_manager.retry_job(&req.job_id).await {
+        match self.job_manager.retry_job(job).await {
             Ok(_) => {
                 // After retry, notify workers (job is re-enqueued)
                 if let Ok(Some(job)) = self.job_manager.get_job_by_id(&req.job_id).await {
                     self.notify_workers(&job.job_type, NotificationType::RetryJob)
                         .await;
                 }
-                Ok(Response::new(stackduck::RetryJobResponse { success: true }))
+                Ok(Response::new(RetryJobResponse { success: true }))
             }
             Err(e) => {
                 println!("Failed to retry job {}: {}", req.job_id, e);
-                Ok(Response::new(stackduck::RetryJobResponse {
-                    success: false,
-                }))
+                Ok(Response::new(RetryJobResponse { success: false }))
             }
         }
     }

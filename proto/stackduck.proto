@@ -10,6 +10,10 @@ service StackDuckService {
   rpc ConsumeJobs(ConsumeJobsRequest) returns (stream JobMessage);
   rpc CompleteJob(CompleteJobRequest) returns (CompleteJobResponse);
   rpc FailJob(FailJobRequest) returns (FailJobResponse);
+
+  // Internal endpoints
+  rpc DequeueJob(DequeueJobRequest) returns (DequeueJobResponse);
+  rpc RetryJob(RetryJobRequest) returns (RetryJobResponse);
 }
 
 // Request/Response messages
@@ -29,17 +33,35 @@ message EnqueueJobResponse {
   string error_message = 3;
 }
 
+message DequeueJobRequest {
+  string queue_name = 1;
+}
+
+message DequeueJobResponse {
+  GrpcJob job = 1;
+  bool success =  2;
+  string error_message = 3;
+}
+
 message ConsumeJobsRequest {
   string worker_id = 1;
   repeated string job_types = 2;
 }
 
+message RetryJobRequest {
+  string job_id = 1;       // required: ID of the job to retry
+}
+
+message RetryJobResponse {
+  bool success = 1;        // true if re-enqueued successfully
+}
+
 message JobMessage {
-  Job job = 1;
+  GrpcJob job = 1;
   string notification_type = 2;
 }
 
-message Job {
+message GrpcJob {
   string id = 1;
   string job_type = 2;
   string payload = 3;

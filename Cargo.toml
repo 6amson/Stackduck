@@ -1,7 +1,7 @@
 [package]
 name = "stackduck"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
@@ -18,9 +18,10 @@ strum = "0.25"
 strum_macros = "0.25"
 tonic = "0.13.1"
 tokio-stream = { version = "0.1.17", features = ["sync"] } 
-prost = "0.14.1"
+prost = "0.13"
 async-stream = "0.3.6"
 futures = "0.3.31"
+tracing = "0.1.41"
 
 [build-dependencies]
 tonic-build = "0.13.1"

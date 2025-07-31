@@ -105,7 +105,7 @@ impl StackDuck {
         let db_pool = connect_to_db(database_url).await?;
         let redis_client = connect_to_redis(redis_url)
             .await
-            .map_err(|err| StackDuckError::JobError((err.to_string())))?;
+            .map_err(|err| StackDuckError::JobError(err.to_string()))?;
         Ok(Self {
             db_pool,
             redis_client: Some(redis_client),

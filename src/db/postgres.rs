@@ -2,11 +2,10 @@ use std::time::Duration;
 
 use crate::{
     error::StackDuckError,
-    types::{Job, JobStatus},
 };
 
 use sqlx::{
-    pool, postgres::{PgPoolOptions, Postgres},
+    postgres::{PgPoolOptions, Postgres},
     Pool,
 };
 
