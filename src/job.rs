@@ -79,7 +79,6 @@ impl JobManager {
                     .timestamp() as f64;
 
                 // Simple scoring: priority * 1e10 + timestamp
-                // Priority 1 (high) gets lowest scores, processed first
                 let score = (-priority as f64 * 1e10) + base_timestamp;
 
                 if conn

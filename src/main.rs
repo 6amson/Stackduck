@@ -7,12 +7,19 @@ pub mod stackduck {
 }
 pub mod queue;
 
-use crate::db::postgres::{DbPool, connect_to_db};
+use std::collections::{HashMap,};
+use tokio::sync::Mutex;
+use crate::db::postgres::{connect_to_db, DbPool};
 use crate::db::redis::connect_to_redis;
 use crate::error::StackDuckError;
 use crate::types::RedisClient;
-use sqlx::{Postgres, pool::PoolConnection};
+use crate::types::JobManager;
 use deadpool_redis;
+use sqlx::{pool::PoolConnection, Postgres};
+use stackduck::stack_duck_service_server::StackDuckServiceServer;
+use crate::queue::StackduckGrpcService;
+use std::sync::Arc;
+use tonic::transport::Server;
 
 pub struct StackDuck {
     pub db_pool: DbPool,
@@ -24,17 +31,18 @@ async fn main() -> Result<(), StackDuckError> {
     // Load environment variables
     dotenvy::dotenv().ok();
 
-    // Initialize logging
-    // env_logger::init();
-
     println!("🦆 Starting StackDuck Job Queue System...");
 
     // Get configuration from environment
     let database_url =
         std::env::var("DATABASE_URL").expect("DATABASE_URL environment variable is required");
-    let redis_url = std::env::var("REDIS_URL").ok(); // Optional Redis
+    let redis_url = std::env::var("REDIS_URL").ok();
+    let server_addr = std::env::var("SERVER_ADDR")
+        .unwrap_or_else(|_| "[::1]:50051".to_string())
+        .parse()
+        .expect("Invalid SERVER_ADDR format");
 
-    // Initialize StackDuck with or without Redis
+    // Initialize StackDuck
     let stackduck = match redis_url {
         Some(redis_url) => {
             println!("📡 Initializing with Redis support...");
@@ -50,41 +58,22 @@ async fn main() -> Result<(), StackDuckError> {
     println!("🔄 Running database migrations...");
     stackduck.run_migrations().await?;
 
-    // // Test the connection
-    // println!("🔍 Testing database connection...");
-    // test_database_connection(&stackduck).await?;
+    // Create gRPC service
+    let job_manager = Arc::new(JobManager {
+        db_pool: stackduck.db_pool.clone(),
+        redis_pool: stackduck.redis_client.clone(),
+        in_memory_queue: Mutex::new(HashMap::new()),
+    });
+    let grpc_service = StackduckGrpcService::new(job_manager);
 
-    // // Test Redis connection if available
-    // if stackduck.has_redis() {
-    //     println!("🔍 Testing Redis connection...");
-    //     test_redis_connection(&stackduck).await?;
-    // }
+    // Start gRPC server
+    println!("🚀 Starting gRPC server on {}", server_addr);
 
-    // // Test database connection
-    // async fn test_database_connection(stackduck: &StackDuck) -> Result<(), StackDuckError> {
-    //     let mut conn = stackduck.get_postgres_conn().await?;
-
-    //     let result = sqlx::query("SELECT 1 as test")
-    //         .fetch_one(&mut *conn)
-    //         .await
-    //         .map_err(|e| StackDuckError::DbConnectionError(e.to_string()))?;
-
-    //     println!("✅ Database connection successful");
-    //     Ok(())
-    // }
-
-    // // Test Redis connection
-    // async fn test_redis_connection(stackduck: &StackDuck) -> Result<(), StackDuckError> {
-    //     let mut conn = stackduck.get_redis_conn().await?;
-
-    //     let _: String = deadpool_redis:: cmd("PING")
-    //         .query_async(&mut conn)
-    //         .await
-    //         .map_err(|e| StackDuckError::RedisConnectionError(e.to_string()))?;
-
-    //     println!("✅ Redis connection successful");
-    //     Ok(())
-    // }
+    Server::builder()
+        .add_service(StackDuckServiceServer::new(grpc_service))
+        .serve(server_addr)
+        .await
+        .map_err(|e| StackDuckError::ServerError(format!("gRPC server failed: {}", e)))?;
 
     Ok(())
 }

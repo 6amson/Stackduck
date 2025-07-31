@@ -1,9 +1,7 @@
-use thiserror::Error;
-use serde_json;
 use deadpool_redis::redis::RedisError;
+use serde_json;
+use thiserror::Error;
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
-
-
 
 #[derive(Debug, Error)]
 pub enum StackDuckError {
@@ -31,8 +29,9 @@ pub enum StackDuckError {
     #[error("Stream error: {0}")]
     StreamError(String),
 
+    #[error("Server error: {0}")]
+    ServerError(String),
+
     #[error("Unknown error occurred")]
     Unknown,
 }
-
-
