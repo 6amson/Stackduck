@@ -3,8 +3,7 @@ use crate::types::RedisClient;
 use deadpool_redis::{Config, Runtime};
 
 pub async fn connect_to_redis(redis_url: &str) -> Result<RedisClient, StackDuckError> {
-    let mut cfg = Config::default();
-    cfg.url = Some(redis_url.to_string());
+    let cfg = Config::from_url(redis_url);
 
     let pool = cfg
         .create_pool(Some(Runtime::Tokio1))

@@ -79,7 +79,8 @@ impl JobManager {
                     .timestamp() as f64;
 
                 // Simple scoring: priority * 1e10 + timestamp
-                let score = (-priority as f64 * 1e10) + base_timestamp;
+                // Highest score = lowest priority
+                let score = (priority as f64 * 1e10) + base_timestamp;
 
                 if conn
                     .zadd::<&str, f64, &str, i32>(&queue_key, &job_json, score)
