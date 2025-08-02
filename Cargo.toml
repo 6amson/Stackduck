@@ -3,6 +3,14 @@ name = "stackduck"
 version = "0.1.0"
 edition = "2021"
 
+[[bin]]
+name = "stackduck"
+path = "src/main.rs"
+
+[lib]
+name = "stackduck"
+path = "src/lib.rs"
+
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 sqlx = { version = "0.7", features = ["runtime-tokio-rustls", "postgres", "chrono", "uuid", "json", "macros"] }
@@ -22,6 +30,8 @@ prost = "0.13"
 async-stream = "0.3.6"
 futures = "0.3.31"
 tracing = "0.1.41"
+futures-util = "0.3.31"
+serial_test = "3.2.0"
 
 [build-dependencies]
 tonic-build = "0.13.1"

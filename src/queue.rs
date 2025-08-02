@@ -5,19 +5,19 @@ use crate::stackduck::{
     GrpcJob, JobMessage, RetryJobRequest, RetryJobResponse,
 };
 use crate::types::{Job, JobManager, JobNotification, NotificationType};
-use futures::stream::{select_all};
+use futures::stream::select_all;
 use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
-use tokio::sync::Mutex;
 use tokio::sync::broadcast;
+use tokio::sync::Mutex;
+use tokio_stream::wrappers::{errors::BroadcastStreamRecvError, BroadcastStream};
 use tokio_stream::{Stream, StreamExt};
-use tokio_stream::wrappers::{BroadcastStream, errors::BroadcastStreamRecvError};
 use tonic::{Request, Response, Status};
 
 pub struct StackduckGrpcService {
-    job_manager: Arc<JobManager>,
-    job_notifiers: Arc<Mutex<HashMap<String, broadcast::Sender<JobNotification>>>>,
+    pub job_manager: Arc<JobManager>,
+    pub job_notifiers: Arc<Mutex<HashMap<String, broadcast::Sender<JobNotification>>>>,
 }
 
 impl StackduckGrpcService {
@@ -29,7 +29,7 @@ impl StackduckGrpcService {
     }
 
     // Notify workers when jobs are available for a specific job_type
-    async fn notify_workers(&self, job_type: &str, notification_type: NotificationType) {
+    pub async fn notify_workers(&self, job_type: &str, notification_type: NotificationType) {
         let notifiers = self.job_notifiers.lock().await;
         if let Some(sender) = notifiers.get(job_type) {
             let notification = JobNotification {
@@ -227,7 +227,6 @@ impl StackDuckService for StackduckGrpcService {
         let job_types = req.job_types.clone();
         let job_types2 = req.job_types.clone();
 
-
         let stream = async_stream::stream! {
             // First, check for existing jobs in all requested queues
             for job_type in job_types {
@@ -269,10 +268,7 @@ impl StackDuckService for StackduckGrpcService {
 
         let job_tt = job_types2.clone();
 
-        println!(
-            "Worker {} subscribed to job types: {:?}",
-            worker_id, job_tt
-        );
+        println!("Worker {} subscribed to job types: {:?}", worker_id, job_tt);
 
         Ok(Response::new(Box::pin(stream)))
     }

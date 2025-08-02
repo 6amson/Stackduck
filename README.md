@@ -270,9 +270,7 @@ Retries a failed job if within retry limits.
 
 - `DATABASE_URL`: PostgreSQL connection string
 - `REDIS_URL`: Redis connection string (optional)
-- `GRPC_PORT`: gRPC server port (default: 50051)
-- `MAX_CONNECTIONS`: Database connection pool size
-- `WORKER_TIMEOUT`: Job processing timeout in seconds
+- `SERVER_ADDR`: gRPC server port (default: 50051)
 
 ### Job Defaults
 

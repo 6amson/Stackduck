@@ -5,12 +5,10 @@ use serde::{self, Deserialize, Serialize};
 use sqlx::{FromRow, Type};
 use std::collections::{HashMap, VecDeque};
 use strum_macros::Display;
-use uuid::Uuid;
 use tokio::sync::Mutex;
-
+use uuid::Uuid;
 
 pub type InMemoryQueue = Mutex<HashMap<String, VecDeque<Job>>>;
-
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct Job {
@@ -93,4 +91,3 @@ pub struct GrpcJob {
     pub created_at: i64,
     pub updated_at: i64,
 }
-

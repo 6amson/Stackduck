@@ -24,7 +24,6 @@ message EnqueueJobRequest {
   int32 delay = 4;
   int32 max_retries = 5;
   int32 retry_count = 6;
-  int64 scheduled_at = 7;
 }
 
 message EnqueueJobResponse {

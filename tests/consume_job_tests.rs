@@ -1,8 +1,18 @@
-// tests/consume_jobs_tests.rs
 use futures_util::StreamExt;
 use serde_json::json;
 use serial_test::serial;
-use stackduck::*;
+// use stackduck::queue::StackDuckService;
+use stackduck::stackduck::stack_duck_service_server::StackDuckService;
+use stackduck::queue::StackduckGrpcService;
+use stackduck::stackduck::{
+    CompleteJobRequest, EnqueueJobRequest, ConsumeJobsRequest, DequeueJobRequest, EnqueueJobResponse, FailJobRequest, RetryJobRequest,
+    RetryJobResponse,
+};
+use stackduck::types::{JobManager, NotificationType};
+use stackduck::StackDuck;
+
+// use stackduck::stackduck::stack_duck_service_server::StackDuckService;
+use deadpool_redis::{redis::AsyncCommands, Connection};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -45,7 +55,6 @@ mod consume_test_utils {
 
         if let Some(client) = &service.job_manager.redis_pool {
             if let Ok(mut conn) = client.get_redis_client().await {
-                use redis::AsyncCommands;
                 let _: () = conn.flushdb().await.unwrap();
             }
         }
