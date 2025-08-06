@@ -23,7 +23,7 @@ message EnqueueJobRequest {
   int32 priority = 3;
   int32 delay = 4;
   int32 max_retries = 5;
-  int32 retry_count = 6;
+  string scheduled_at = 6;
 }
 
 message EnqueueJobResponse {

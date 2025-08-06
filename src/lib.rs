@@ -5,21 +5,14 @@ pub mod types;
 pub mod stackduck {
     tonic::include_proto!("stackduck");
 }
-pub mod queue;
-// pub use self::StackDuck;
+pub mod grpc;
 
 use crate::db::postgres::{connect_to_db, DbPool};
 use crate::db::redis::connect_to_redis;
 use crate::error::StackDuckError;
-use crate::queue::StackduckGrpcService;
-use crate::types::{JobManager, RedisClient};
+use crate::types::RedisClient;
 use deadpool_redis;
 use sqlx::{pool::PoolConnection, Postgres};
-use stackduck::stack_duck_service_server::StackDuckServiceServer;
-use std::collections::HashMap;
-use std::sync::Arc;
-use tokio::sync::Mutex;
-use tonic::transport::Server;
 
 pub struct StackDuck {
     pub db_pool: DbPool,

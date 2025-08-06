@@ -1,30 +1,8 @@
-// pub mod db;
-// pub mod error;
-// pub mod job;
-// pub mod types;
-// pub mod stackduckproto {
-//     tonic::include_proto!("stackduck");
-// }
-// pub mod queue;
-
-// use crate::db::postgres::{connect_to_db, DbPool};
-// use crate::db::redis::connect_to_redis;
-// use crate::error::StackDuckError;
-// use crate::queue::StackduckGrpcService;
-// use crate::types::{JobManager, RedisClient};
-// use deadpool_redis;
-// use sqlx::{pool::PoolConnection, Postgres};
-// use stackduckproto::stack_duck_service_server::StackDuckServiceServer;
-// use std::collections::HashMap;
-// use std::sync::Arc;
-// use tokio::sync::Mutex;
-// use tonic::transport::Server;
-// use stackduck::StackDuck;
-
-use stackduck::queue::StackduckGrpcService;
-use stackduck::types::{JobManager};
 use stackduck::error::StackDuckError;
+use stackduck::grpc::StackduckGrpcService;
+use stackduck::types::JobManager;
 use stackduck::{stackduck::stack_duck_service_server::StackDuckServiceServer, StackDuck};
+use tokio::signal;
 use tokio::sync::Mutex;
 use tonic::transport::Server;
 
@@ -44,7 +22,7 @@ async fn main() -> Result<(), StackDuckError> {
         std::env::var("DATABASE_URL").expect("DATABASE_URL environment variable is required");
     let redis_url = std::env::var("REDIS_URL").ok();
     let server_addr = std::env::var("SERVER_ADDR")
-        .unwrap_or_else(|_| "[::1]:50051".to_string())
+        .unwrap_or_else(|_| "127.0.0.1:50051".to_string())
         .parse()
         .expect("Invalid SERVER_ADDR format");
 
@@ -77,9 +55,30 @@ async fn main() -> Result<(), StackDuckError> {
 
     Server::builder()
         .add_service(StackDuckServiceServer::new(grpc_service))
-        .serve(server_addr)
+        .serve_with_shutdown(server_addr, shutdown_signal())
         .await
         .map_err(|e| StackDuckError::ServerError(format!("gRPC server failed: {}", e)))?;
 
     Ok(())
 }
+
+async fn shutdown_signal() {
+    if cfg!(unix) {
+        let mut sigterm = signal::unix::signal(signal::unix::SignalKind::terminate())
+            .expect("failed to install SIGTERM handler");
+
+        tokio::select! {
+            _ = signal::ctrl_c() => {
+                println!("🛑 Ctrl+C received. Initiating shutdown...");
+            }
+            _ = sigterm.recv() => {
+                println!("🛑 SIGTERM received. Initiating shutdown...");
+            }
+        }
+    } else {
+        signal::ctrl_c().await.expect("failed to install Ctrl+C handler");
+        println!("🛑 Ctrl+C received. Initiating shutdown...");
+    }
+}
+
+

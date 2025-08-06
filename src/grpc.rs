@@ -5,6 +5,7 @@ use crate::stackduck::{
     GrpcJob, JobMessage, RetryJobRequest, RetryJobResponse,
 };
 use crate::types::{Job, JobManager, JobNotification, NotificationType};
+use chrono::{DateTime, Utc};
 use futures::stream::select_all;
 use std::collections::HashMap;
 use std::pin::Pin;
@@ -109,21 +110,26 @@ impl StackDuckService for StackduckGrpcService {
             2
         };
 
-        let retry_count = if (0..=4).contains(&req.retry_count) {
-            req.retry_count
+        let scheduled_at = if !req.scheduled_at.trim().is_empty() {
+            Some(
+                DateTime::parse_from_rfc3339(&req.scheduled_at)
+                    .map_err(|e| {
+                        Status::invalid_argument(format!("Invalid scheduled_at format: {}", e))
+                    })?
+                    .with_timezone(&Utc),
+            )
         } else {
-            eprintln!("Invalid retry_count {}, defaulting to 0", req.retry_count);
-            0
+            None
         };
 
-        let max_retries = if (1..=4).contains(&req.max_retries) {
+        let max_retries = if (0..=4).contains(&req.max_retries) {
             req.max_retries
         } else {
-            eprintln!("Invalid max_retries {}, defaulting to 2", req.max_retries);
+            eprintln!("Invalid max retries {}, defaulting to 2", req.max_retries);
             2
         };
 
-        let delay = if (1..=3600).contains(&req.delay) {
+        let delay = if (0..=3600).contains(&req.delay) {
             req.delay
         } else {
             eprintln!("Invalid delay {}, defaulting to 30 seconds", req.delay);
@@ -137,7 +143,7 @@ impl StackDuckService for StackduckGrpcService {
             Some(priority),
             Some(delay),
             Some(max_retries),
-            Some(retry_count),
+            scheduled_at,
         );
 
         // USE EXISTING ENQUEUE METHOD
@@ -200,6 +206,79 @@ impl StackDuckService for StackduckGrpcService {
 
     type ConsumeJobsStream = Pin<Box<dyn Stream<Item = Result<JobMessage, Status>> + Send>>;
 
+    // async fn consume_jobs(
+    //     &self,
+    //     request: Request<ConsumeJobsRequest>,
+    // ) -> Result<Response<Self::ConsumeJobsStream>, Status> {
+    //     let req = request.into_inner();
+
+    //     // Create or get broadcast channels for each job type
+    //     let mut all_receivers = Vec::new();
+    //     {
+    //         let mut notifiers = self.job_notifiers.lock().await;
+
+    //         for job_type in &req.job_types {
+    //             let sender = notifiers
+    //                 .entry(job_type.clone())
+    //                 .or_insert_with(|| broadcast::channel(1000).0)
+    //                 .clone();
+
+    //             all_receivers.push(sender.subscribe());
+    //         }
+    //     }
+
+    //     // Create a stream that listens for notifications and then attempts dequeue
+    //     let job_manager = self.job_manager.clone();
+    //     let worker_id = req.worker_id.clone();
+    //     let job_types = req.job_types.clone();
+    //     let job_types2 = req.job_types.clone();
+
+    //     let stream = async_stream::stream! {
+    //         // First, check for existing jobs in all requested queues
+    //         for job_type in job_types {
+    //             while let Ok(Some(job)) = job_manager.dequeue(&job_type).await {
+    //                 yield Ok(JobMessage {
+    //                     job: Some(StackduckGrpcService::job_to_grpc(job)),
+    //                     notification_type: NotificationType::ExistingJob.to_string(), // Add notification_type
+    //                 });
+    //             }
+    //         }
+
+    //         // Then listen for new job notifications
+    //         let mut merged_receivers = Self::merge_notification_receivers(all_receivers);
+
+    //         while let Some(notification_result) = merged_receivers.next().await {
+    //             let notification = notification_result;
+
+    //             // Process the notification
+    //             match job_manager.dequeue(&notification.job_type).await {
+    //                 Ok(Some(job)) => {
+    //                     yield Ok(JobMessage {
+    //                         job: Some(StackduckGrpcService::job_to_grpc(job)),
+    //                         notification_type: notification.notification_type.to_string(), // Use the actual notification type
+    //                     });
+    //                 }
+    //                 Ok(None) => {
+    //                     // Job was already taken by another worker - normal in distributed systems
+    //                     eprintln!("Job already processed for type: {}", notification.job_type);
+    //                     // Don't yield anything, just continue
+    //                 }
+    //                 Err(e) => {
+    //                     eprintln!("Dequeue failed for {}: {:?}", notification.job_type, e);
+    //                     // Yield error instead of using .into() which might not be implemented
+    //                     yield Err(Status::internal(format!("Dequeue failed: {}", e)));
+    //                 }
+    //             }
+    //         }
+    //     };
+
+    //     let job_tt = job_types2.clone();
+
+    //     println!("Worker {} subscribed to job types: {:?}", worker_id, job_tt);
+
+    //     Ok(Response::new(Box::pin(stream)))
+    // }
+
     async fn consume_jobs(
         &self,
         request: Request<ConsumeJobsRequest>,
@@ -224,42 +303,57 @@ impl StackDuckService for StackduckGrpcService {
         // Create a stream that listens for notifications and then attempts dequeue
         let job_manager = self.job_manager.clone();
         let worker_id = req.worker_id.clone();
+        let worker_id2 = req.worker_id.clone();
         let job_types = req.job_types.clone();
         let job_types2 = req.job_types.clone();
 
         let stream = async_stream::stream! {
+            println!("🔍 Worker {} checking for existing jobs in types: {:?}", worker_id, job_types);
+
             // First, check for existing jobs in all requested queues
+            let mut existing_job_count = 0;
             for job_type in job_types {
+                println!("🔍 Checking existing jobs for type: {}", job_type);
+
                 while let Ok(Some(job)) = job_manager.dequeue(&job_type).await {
+                    existing_job_count += 1;
+                    println!("🔍 Found existing job {}: id={}, type={}, status={}",
+                    existing_job_count, job.id, job.job_type, job.status);
+
                     yield Ok(JobMessage {
                         job: Some(StackduckGrpcService::job_to_grpc(job)),
-                        notification_type: NotificationType::ExistingJob.to_string(), // Add notification_type
+                        notification_type: NotificationType::ExistingJob.to_string(),
                     });
                 }
+
+                println!("🔍 No more existing jobs for type: {}", job_type);
             }
+
+            println!("🔍 Found {} existing jobs total, now listening for new jobs...", existing_job_count);
 
             // Then listen for new job notifications
             let mut merged_receivers = Self::merge_notification_receivers(all_receivers);
 
             while let Some(notification_result) = merged_receivers.next().await {
                 let notification = notification_result;
+                println!("🔍 Received notification for job_type: {}", notification.job_type);
 
                 // Process the notification
                 match job_manager.dequeue(&notification.job_type).await {
                     Ok(Some(job)) => {
+                        println!("🔍 Successfully dequeued job: id={}, type={}", job.id, job.job_type);
                         yield Ok(JobMessage {
                             job: Some(StackduckGrpcService::job_to_grpc(job)),
-                            notification_type: notification.notification_type.to_string(), // Use the actual notification type
+                            notification_type: notification.notification_type.to_string(),
                         });
                     }
                     Ok(None) => {
                         // Job was already taken by another worker - normal in distributed systems
-                        eprintln!("Job already processed for type: {}", notification.job_type);
+                        println!("🔍 Job already processed for type: {}", notification.job_type);
                         // Don't yield anything, just continue
                     }
                     Err(e) => {
-                        eprintln!("Dequeue failed for {}: {:?}", notification.job_type, e);
-                        // Yield error instead of using .into() which might not be implemented
+                        println!("🔍 Dequeue failed for {}: {:?}", notification.job_type, e);
                         yield Err(Status::internal(format!("Dequeue failed: {}", e)));
                     }
                 }
@@ -267,8 +361,10 @@ impl StackDuckService for StackduckGrpcService {
         };
 
         let job_tt = job_types2.clone();
-
-        println!("Worker {} subscribed to job types: {:?}", worker_id, job_tt);
+        println!(
+            "Worker {} subscribed to job types: {:?}",
+            worker_id2, job_tt
+        );
 
         Ok(Response::new(Box::pin(stream)))
     }

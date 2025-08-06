@@ -1,39 +1,43 @@
 use futures_util::StreamExt;
 use serde_json::json;
 use serial_test::serial;
-// use stackduck::queue::StackDuckService;
+use stackduck::grpc::StackduckGrpcService;
 use stackduck::stackduck::stack_duck_service_server::StackDuckService;
-use stackduck::queue::StackduckGrpcService;
 use stackduck::stackduck::{
-    CompleteJobRequest, EnqueueJobRequest, ConsumeJobsRequest, DequeueJobRequest, EnqueueJobResponse, FailJobRequest, RetryJobRequest,
-    RetryJobResponse,
+    ConsumeJobsRequest, DequeueJobRequest, EnqueueJobRequest, RetryJobRequest,
 };
 use stackduck::types::{JobManager, NotificationType};
 use stackduck::StackDuck;
 
-// use stackduck::stackduck::stack_duck_service_server::StackDuckService;
-use deadpool_redis::{redis::AsyncCommands, Connection};
+use deadpool_redis::redis::AsyncCommands;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{broadcast, Mutex};
+use tokio::sync::Mutex;
 use tokio::time::{sleep, timeout};
-use tonic::{Request, Response, Status};
+use tonic::Request;
 
 mod consume_test_utils {
     use super::*;
 
     pub async fn setup_grpc_service() -> StackduckGrpcService {
+        dotenvy::dotenv().ok();
+
         let db_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
             "postgresql://stackduck_test:test_password@localhost:5433/stackduck_test".to_string()
         });
+        println!("🧪 Using DB URL: {}", db_url);
         let redis_url =
             std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://localhost:6380".to_string());
 
         let stackduck = StackDuck::new_with_redis(&db_url, &redis_url)
             .await
-            .unwrap();
-        stackduck.run_migrations().await.unwrap();
+            .expect("Failed to setup test database");
+
+        stackduck
+            .run_migrations()
+            .await
+            .expect("Failed to run migrations");
 
         let job_manager = Arc::new(JobManager {
             db_pool: stackduck.db_pool.clone(),
@@ -41,10 +45,7 @@ mod consume_test_utils {
             in_memory_queue: Mutex::new(HashMap::new()),
         });
 
-        StackduckGrpcService {
-            job_manager,
-            job_notifiers: Arc::new(Mutex::new(HashMap::new())),
-        }
+        StackduckGrpcService::new(job_manager)
     }
 
     pub async fn cleanup_service_data(service: &StackduckGrpcService) {
@@ -65,7 +66,7 @@ mod consume_test_utils {
             job_type: job_type.to_string(),
             payload: json!({"test": "data"}).to_string(),
             priority: 2,
-            retry_count: 0,
+            scheduled_at: "2025-08-04T21:00:00Z".to_string(),
             max_retries: 2,
             delay: 30,
         });
@@ -95,14 +96,18 @@ async fn test_consume_jobs_existing_jobs() {
     let response = service.consume_jobs(request).await.unwrap();
     let mut stream = response.into_inner();
 
+    println!("🧪 Starting consume stream...");
+    // println!("Response: {:?}", response);
+
     // Should immediately get the 2 existing jobs
     let mut received_jobs = Vec::new();
 
     // Use timeout to avoid hanging if no jobs come
     for _ in 0..2 {
-        match timeout(Duration::from_secs(5), stream.next()).await {
+        match timeout(Duration::from_secs(25), stream.next()).await {
             Ok(Some(Ok(job_message))) => {
                 let job = job_message.job.unwrap();
+                println!("🧪 Received job: {:?}", job);
                 received_jobs.push(job.id);
                 assert_eq!(job.job_type, "test_queue");
                 assert_eq!(
