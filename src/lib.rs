@@ -16,29 +16,21 @@ use sqlx::{pool::PoolConnection, Postgres};
 
 pub struct StackDuck {
     pub db_pool: DbPool,
-    pub redis_client: Option<RedisClient>,
+    pub redis_client: RedisClient,
 }
 
 impl StackDuck {
-    pub async fn new(database_url: &str) -> Result<Self, StackDuckError> {
-        let db_pool = connect_to_db(database_url).await?;
-        Ok(Self {
-            db_pool,
-            redis_client: None,
-        })
-    }
 
-    pub async fn new_with_redis(
+    pub async fn new(
         database_url: &str,
         redis_url: &str,
     ) -> Result<Self, StackDuckError> {
         let db_pool = connect_to_db(database_url).await?;
         let redis_client = connect_to_redis(redis_url)
-            .await
-            .map_err(|err| StackDuckError::JobError(err.to_string()))?;
+            .await?;
         Ok(Self {
             db_pool,
-            redis_client: Some(redis_client),
+            redis_client: redis_client,
         })
     }
 
@@ -50,10 +42,6 @@ impl StackDuck {
         Ok(())
     }
 
-    pub fn has_redis(&self) -> bool {
-        self.redis_client.is_some()
-    }
-
     pub async fn get_postgres_conn(&self) -> Result<PoolConnection<Postgres>, StackDuckError> {
         self.db_pool
             .acquire()
@@ -62,11 +50,7 @@ impl StackDuck {
     }
 
     pub async fn get_redis_conn(&self) -> Result<deadpool_redis::Connection, StackDuckError> {
-        match &self.redis_client {
-            Some(client) => client.get_redis_client().await,
-            None => Err(StackDuckError::RedisConnectionError(
-                "Redis not configured".into(),
-            )),
-        }
+        let conn = self.redis_client.get_redis_client().await?;
+        Ok(conn)
     }
 }

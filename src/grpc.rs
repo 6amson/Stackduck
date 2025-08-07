@@ -1,20 +1,23 @@
 use crate::stackduck::stack_duck_service_server::StackDuckService;
 use crate::stackduck::{
-    CompleteJobRequest, CompleteJobResponse, ConsumeJobsRequest, DequeueJobRequest,
-    DequeueJobResponse, EnqueueJobRequest, EnqueueJobResponse, FailJobRequest, FailJobResponse,
+    CompleteJobRequest, CompleteJobResponse, ConsumeJobsRequest, EnqueueJobRequest, DequeueJobRequest, DequeueJobResponse, EnqueueJobResponse, FailJobRequest, FailJobResponse,
     GrpcJob, JobMessage, RetryJobRequest, RetryJobResponse,
 };
 use crate::types::{Job, JobManager, JobNotification, NotificationType};
 use chrono::{DateTime, Utc};
-use futures::stream::select_all;
+use futures::stream::{BoxStream, SelectAll};
+use futures::StreamExt;
 use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::sync::broadcast;
 use tokio::sync::Mutex;
-use tokio_stream::wrappers::{errors::BroadcastStreamRecvError, BroadcastStream};
-use tokio_stream::{Stream, StreamExt};
+use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
+use tokio_stream::wrappers::BroadcastStream;
+use tokio_stream::Stream;
 use tonic::{Request, Response, Status};
+use tracing::{debug, error, info, span, warn, Level};
 
 pub struct StackduckGrpcService {
     pub job_manager: Arc<JobManager>,
@@ -36,6 +39,7 @@ impl StackduckGrpcService {
             let notification = JobNotification {
                 job_type: job_type.to_string(),
                 notification_type,
+                timestamp: Instant::now(),
             };
             let _ = sender.send(notification);
         }
@@ -68,25 +72,25 @@ impl StackduckGrpcService {
     }
 
     fn merge_notification_receivers(
-        receivers: Vec<broadcast::Receiver<JobNotification>>,
-    ) -> impl Stream<Item = JobNotification> {
+        mut receivers: Vec<tokio::sync::broadcast::Receiver<JobNotification>>,
+    ) -> SelectAll<BoxStream<'static, JobNotification>> {
         let streams = receivers
-            .into_iter()
+            .drain(..)
             .map(|rx| {
-                BroadcastStream::new(rx).filter_map(|result| {
-                    // Sync closure, no async needed
+                let stream = BroadcastStream::new(rx).filter_map(|result| async move {
                     match result {
                         Ok(notification) => Some(notification),
-                        Err(BroadcastStreamRecvError::Lagged(n)) => {
-                            eprintln!("Receiver lagged by {} messages, skipping", n);
+                        Err(BroadcastStreamRecvError::Lagged(skipped)) => {
+                            warn!("Worker lagged, skipped {} notifications", skipped);
                             None
                         }
                     }
-                })
+                });
+                Box::pin(stream) as BoxStream<'static, JobNotification>
             })
             .collect::<Vec<_>>();
 
-        select_all(streams)
+        SelectAll::from_iter(streams)
     }
 }
 
@@ -174,15 +178,22 @@ impl StackDuckService for StackduckGrpcService {
         let req = request.into_inner();
 
         // USE EXISTING DEQUEUE METHOD
-        // dequeue checks Redis -> InMemory -> Postgres in that order
-        match self.job_manager.dequeue(&req.queue_name).await {
+        // dequeue checks Redis -> Postgres in that order
+        match self
+            .job_manager
+            .dequeue(&req.queue_name, Some(&req.worker_id))
+            .await
+        {
             Ok(Some(job)) => {
                 let grpc_job: GrpcJob = StackduckGrpcService::job_to_grpc(job);
+                let jobb = grpc_job.clone();
                 let response = DequeueJobResponse {
                     job: Some(grpc_job),
                     success: true,
                     error_message: String::new(),
                 };
+                self.notify_workers(&jobb.job_type, NotificationType::NewJob)
+                        .await;
                 Ok(Response::new(response))
             }
             Ok(None) => {
@@ -205,169 +216,6 @@ impl StackDuckService for StackduckGrpcService {
     }
 
     type ConsumeJobsStream = Pin<Box<dyn Stream<Item = Result<JobMessage, Status>> + Send>>;
-
-    // async fn consume_jobs(
-    //     &self,
-    //     request: Request<ConsumeJobsRequest>,
-    // ) -> Result<Response<Self::ConsumeJobsStream>, Status> {
-    //     let req = request.into_inner();
-
-    //     // Create or get broadcast channels for each job type
-    //     let mut all_receivers = Vec::new();
-    //     {
-    //         let mut notifiers = self.job_notifiers.lock().await;
-
-    //         for job_type in &req.job_types {
-    //             let sender = notifiers
-    //                 .entry(job_type.clone())
-    //                 .or_insert_with(|| broadcast::channel(1000).0)
-    //                 .clone();
-
-    //             all_receivers.push(sender.subscribe());
-    //         }
-    //     }
-
-    //     // Create a stream that listens for notifications and then attempts dequeue
-    //     let job_manager = self.job_manager.clone();
-    //     let worker_id = req.worker_id.clone();
-    //     let job_types = req.job_types.clone();
-    //     let job_types2 = req.job_types.clone();
-
-    //     let stream = async_stream::stream! {
-    //         // First, check for existing jobs in all requested queues
-    //         for job_type in job_types {
-    //             while let Ok(Some(job)) = job_manager.dequeue(&job_type).await {
-    //                 yield Ok(JobMessage {
-    //                     job: Some(StackduckGrpcService::job_to_grpc(job)),
-    //                     notification_type: NotificationType::ExistingJob.to_string(), // Add notification_type
-    //                 });
-    //             }
-    //         }
-
-    //         // Then listen for new job notifications
-    //         let mut merged_receivers = Self::merge_notification_receivers(all_receivers);
-
-    //         while let Some(notification_result) = merged_receivers.next().await {
-    //             let notification = notification_result;
-
-    //             // Process the notification
-    //             match job_manager.dequeue(&notification.job_type).await {
-    //                 Ok(Some(job)) => {
-    //                     yield Ok(JobMessage {
-    //                         job: Some(StackduckGrpcService::job_to_grpc(job)),
-    //                         notification_type: notification.notification_type.to_string(), // Use the actual notification type
-    //                     });
-    //                 }
-    //                 Ok(None) => {
-    //                     // Job was already taken by another worker - normal in distributed systems
-    //                     eprintln!("Job already processed for type: {}", notification.job_type);
-    //                     // Don't yield anything, just continue
-    //                 }
-    //                 Err(e) => {
-    //                     eprintln!("Dequeue failed for {}: {:?}", notification.job_type, e);
-    //                     // Yield error instead of using .into() which might not be implemented
-    //                     yield Err(Status::internal(format!("Dequeue failed: {}", e)));
-    //                 }
-    //             }
-    //         }
-    //     };
-
-    //     let job_tt = job_types2.clone();
-
-    //     println!("Worker {} subscribed to job types: {:?}", worker_id, job_tt);
-
-    //     Ok(Response::new(Box::pin(stream)))
-    // }
-
-    async fn consume_jobs(
-        &self,
-        request: Request<ConsumeJobsRequest>,
-    ) -> Result<Response<Self::ConsumeJobsStream>, Status> {
-        let req = request.into_inner();
-
-        // Create or get broadcast channels for each job type
-        let mut all_receivers = Vec::new();
-        {
-            let mut notifiers = self.job_notifiers.lock().await;
-
-            for job_type in &req.job_types {
-                let sender = notifiers
-                    .entry(job_type.clone())
-                    .or_insert_with(|| broadcast::channel(1000).0)
-                    .clone();
-
-                all_receivers.push(sender.subscribe());
-            }
-        }
-
-        // Create a stream that listens for notifications and then attempts dequeue
-        let job_manager = self.job_manager.clone();
-        let worker_id = req.worker_id.clone();
-        let worker_id2 = req.worker_id.clone();
-        let job_types = req.job_types.clone();
-        let job_types2 = req.job_types.clone();
-
-        let stream = async_stream::stream! {
-            println!("🔍 Worker {} checking for existing jobs in types: {:?}", worker_id, job_types);
-
-            // First, check for existing jobs in all requested queues
-            let mut existing_job_count = 0;
-            for job_type in job_types {
-                println!("🔍 Checking existing jobs for type: {}", job_type);
-
-                while let Ok(Some(job)) = job_manager.dequeue(&job_type).await {
-                    existing_job_count += 1;
-                    println!("🔍 Found existing job {}: id={}, type={}, status={}",
-                    existing_job_count, job.id, job.job_type, job.status);
-
-                    yield Ok(JobMessage {
-                        job: Some(StackduckGrpcService::job_to_grpc(job)),
-                        notification_type: NotificationType::ExistingJob.to_string(),
-                    });
-                }
-
-                println!("🔍 No more existing jobs for type: {}", job_type);
-            }
-
-            println!("🔍 Found {} existing jobs total, now listening for new jobs...", existing_job_count);
-
-            // Then listen for new job notifications
-            let mut merged_receivers = Self::merge_notification_receivers(all_receivers);
-
-            while let Some(notification_result) = merged_receivers.next().await {
-                let notification = notification_result;
-                println!("🔍 Received notification for job_type: {}", notification.job_type);
-
-                // Process the notification
-                match job_manager.dequeue(&notification.job_type).await {
-                    Ok(Some(job)) => {
-                        println!("🔍 Successfully dequeued job: id={}, type={}", job.id, job.job_type);
-                        yield Ok(JobMessage {
-                            job: Some(StackduckGrpcService::job_to_grpc(job)),
-                            notification_type: notification.notification_type.to_string(),
-                        });
-                    }
-                    Ok(None) => {
-                        // Job was already taken by another worker - normal in distributed systems
-                        println!("🔍 Job already processed for type: {}", notification.job_type);
-                        // Don't yield anything, just continue
-                    }
-                    Err(e) => {
-                        println!("🔍 Dequeue failed for {}: {:?}", notification.job_type, e);
-                        yield Err(Status::internal(format!("Dequeue failed: {}", e)));
-                    }
-                }
-            }
-        };
-
-        let job_tt = job_types2.clone();
-        println!(
-            "Worker {} subscribed to job types: {:?}",
-            worker_id2, job_tt
-        );
-
-        Ok(Response::new(Box::pin(stream)))
-    }
 
     async fn complete_job(
         &self,
@@ -430,4 +278,175 @@ impl StackDuckService for StackduckGrpcService {
             }
         }
     }
+
+    async fn consume_jobs(
+        &self,
+        request: Request<ConsumeJobsRequest>,
+    ) -> Result<Response<Self::ConsumeJobsStream>, Status> {
+        let req = request.into_inner();
+
+        // Validate input
+        if req.job_types.is_empty() {
+            return Err(Status::invalid_argument("job_types cannot be empty"));
+        }
+
+        let worker_span = span!(Level::INFO, "worker", id = %req.worker_id);
+        let _enter = worker_span.enter();
+
+        // Setup broadcast receivers - scope the lock properly
+        let receivers = {
+            let mut notifiers = self.job_notifiers.lock().await;
+            req.job_types
+                .iter()
+                .map(|job_type| {
+                    notifiers
+                        .entry(job_type.clone())
+                        .or_insert_with(|| broadcast::channel(1000).0)
+                        .subscribe()
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let job_manager = Arc::clone(&self.job_manager);
+        let worker_id = req.worker_id.clone();
+        let job_types = req.job_types.clone();
+
+        info!("Starting job consumption for types: {:?}", job_types);
+
+        let stream = async_stream::stream! {
+            // Phase 1: Check existing jobs with round-robin fairness.
+            let mut queue_index = 0;
+            let mut jobs_found = true;
+            let mut existing_job_count = 0;
+            const MAX_EXISTING_JOBS: usize = 20; // Safety limit
+
+            debug!("Checking for existing jobs in types: {:?}", job_types);
+
+            // Round-robin through types until no more jobs found
+            while jobs_found && existing_job_count < MAX_EXISTING_JOBS {
+                jobs_found = false;
+
+                // Check each type once per round
+                for _ in 0..job_types.len() {
+                    let job_type = &job_types[queue_index % job_types.len()];
+                    queue_index += 1;
+                    println!("🔴 Worker {} attempting dequeue for {}", worker_id, job_type);
+
+                    match job_manager.dequeue(job_type, Some(&worker_id)).await {
+                        Ok(Some(job)) => {
+                            debug!("Found existing job: id={}, type={}", job.id, job.job_type);
+                            existing_job_count += 1;
+                            jobs_found = true;
+
+                            yield Ok(JobMessage {
+                                job: Some(Self::job_to_grpc(job)),
+                                notification_type: NotificationType::ExistingJob.to_string(),
+                            });
+                        }
+                        Ok(None) => {
+                            // No job in this queue, continue to next
+                        }
+                        Err(e) => {
+                            error!("Error checking existing jobs for type {}: {:?}", job_type, e);
+                            yield Err(Status::internal("Failed to check existing jobs"));
+                            return;
+                        }
+                    }
+                }
+            }
+
+            info!("Found {} existing jobs, now listening for notifications...", existing_job_count);
+
+            // Phase 2: Listen for notifications (your original event-driven approach)
+            let mut notification_stream = Self::merge_notification_receivers(receivers);
+
+            while let Some(notification) = notification_stream.next().await {
+                let job_type = &notification.job_type;
+                println!("Received notification of type: {} for job_type: {}", notification.notification_type, job_type);
+
+                match job_manager.dequeue(job_type, Some(&worker_id)).await {
+                    Ok(Some(job)) => {
+                        debug!("Successfully dequeued job: id={}, type={}", job.id, job.job_type);
+                        yield Ok(JobMessage {
+                            job: Some(Self::job_to_grpc(job)),
+                            notification_type: notification.notification_type.to_string(),
+                        });
+                    }
+                    Ok(None) => {
+                        debug!("Job already processed for type: {}", job_type);
+                    }
+                    Err(e) => {
+                        warn!("Dequeue failed for {}: {:?}", job_type, e);
+                    }
+                }
+            }
+
+            info!("Worker stream ended");
+        };
+
+        Ok(Response::new(Box::pin(stream)))
+    }
 }
+
+// impl StackduckGrpcService {
+//     /// Drain existing jobs with true round-robin fairness
+//     async fn drain_existing_jobs(
+//         job_manager: &JobManager,
+//         job_types: &[String],
+//         worker_id: &str,
+//     ) -> Vec<Result<Job, StackDuckError>> {
+//         const MAX_TOTAL_EXISTING: usize = 50; // Circuit breaker
+
+//         let mut results = Vec::new();
+//         let mut queue_index = 0;
+//         let mut consecutive_empty = 0;
+//         let job_type_count = job_types.len();
+
+//         debug!("Draining existing jobs for worker: {}", worker_id);
+
+//         // True round-robin: one job per type per iteration
+//         loop {
+//             // Circuit breaker
+//             if results.len() >= MAX_TOTAL_EXISTING {
+//                 warn!(
+//                     "Hit maximum existing jobs limit ({}), stopping drain",
+//                     MAX_TOTAL_EXISTING
+//                 );
+//                 break;
+//             }
+
+//             // Stop if we've cycled through all types without finding jobs
+//             if consecutive_empty >= job_type_count {
+//                 debug!("No more jobs found after checking all types");
+//                 break;
+//             }
+
+//             let job_type = &job_types[queue_index % job_type_count];
+//             queue_index += 1;
+
+//             match job_manager.dequeue(job_type).await {
+//                 Ok(Some(job)) => {
+//                     debug!("Drained existing job: id={}, type={}", job.id, job.job_type);
+//                     results.push(Ok(job));
+//                     consecutive_empty = 0; // Reset counter on successful dequeue
+//                 }
+//                 Ok(None) => {
+//                     consecutive_empty += 1; // No job in this queue
+//                 }
+//                 Err(e) => {
+//                     error!("Error draining jobs for type {}: {:?}", job_type, e);
+//                     results.push(Err(e));
+//                     break;
+//                 }
+//             }
+//         }
+
+//         info!(
+//             "Drained {} existing jobs for worker: {}",
+//             results.len(),
+//             worker_id
+//         );
+//         results
+//     }
+
+// }

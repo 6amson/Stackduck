@@ -12,8 +12,8 @@ service StackDuckService {
   rpc FailJob(FailJobRequest) returns (FailJobResponse);
 
   // Internal endpoints
-  rpc DequeueJob(DequeueJobRequest) returns (DequeueJobResponse);
   rpc RetryJob(RetryJobRequest) returns (RetryJobResponse);
+  rpc DequeueJob(DequeueJobRequest) returns (DequeueJobResponse);
 }
 
 // Request/Response messages
@@ -34,11 +34,12 @@ message EnqueueJobResponse {
 
 message DequeueJobRequest {
   string queue_name = 1;
+  string worker_id = 2;
 }
 
 message DequeueJobResponse {
   GrpcJob job = 1;
-  bool success =  2;
+  bool success = 2;
   string error_message = 3;
 }
 

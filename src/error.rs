@@ -26,6 +26,9 @@ pub enum StackDuckError {
     #[error("Broadcast stream error: {0}")]
     BroadcastStreamRecvError(#[from] BroadcastStreamRecvError),
 
+    #[error("Recv error: {0}")]
+    RecvError(String),
+
     #[error("Stream error: {0}")]
     StreamError(String),
 
