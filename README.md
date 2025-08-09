@@ -91,16 +91,24 @@ Producers (Framework Agnostic)
 
 ### Installation
 
+Install Stackduck:
 ```bash
 cargo install stackduck
+```
 
+### Configure Environment Variables:
+```bash
 export DATABASE_URL="postgres://user:pass@localhost/mydb"
 export REDIS_URL="redis://127.0.0.1:6379"
 export SERVER_ADDR="127.0.0.1:50051" (optional)
+```
 
+### Run Stackduck:
+```bash
 stackduck
 ```
 
+## OR
 
 ```bash
 git clone https://github.com/6amson/Stackduck
