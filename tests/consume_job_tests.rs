@@ -381,7 +381,7 @@ async fn test_consume_jobs_full_retry_workflow() {
     })).await.unwrap();
 
     // Attempt 2: First retry
-    let job2 = timeout(Duration::from_secs(60), stream.next()).await
+    let job2 = timeout(Duration::from_secs(10), stream.next()).await
         .expect("Should receive retry 1")
         .expect("Stream ended")
         .expect("Stream error");
@@ -394,7 +394,7 @@ async fn test_consume_jobs_full_retry_workflow() {
     })).await.unwrap();
 
     // Attempt 3: Second retry
-    let job3 = timeout(Duration::from_secs(60), stream.next()).await
+    let job3 = timeout(Duration::from_secs(10), stream.next()).await
         .expect("Should receive retry 2")
         .expect("Stream ended")
         .expect("Stream error");
