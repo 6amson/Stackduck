@@ -90,8 +90,6 @@ Producers (Framework Agnostic)
 - Redis 6+
 
 ### Installation
-
-Install Stackduck:
 ```bash
 cargo install stackduck
 ```
