@@ -16,6 +16,10 @@ use tokio::time::{sleep, timeout};
 use tonic::Request;
 
 mod consume_test_utils {
+    use std::{collections::HashSet};
+    use tokio::sync::RwLock;
+
+
     use stackduck::error::StackDuckError;
 
     use super::*;
@@ -42,6 +46,7 @@ mod consume_test_utils {
         let job_manager = Arc::new(JobManager {
             db_pool: stackduck.db_pool.clone(),
             redis_pool: stackduck.redis_client.clone(),
+            subscribed_job_types: Arc::new(RwLock::new(HashSet::new())),
         });
 
         StackduckGrpcService::new(job_manager)
@@ -331,7 +336,7 @@ async fn test_consume_jobs_full_retry_workflow() {
     // Start worker FIRST (before creating jobs)
     let consume_request = Request::new(ConsumeJobsRequest {
         worker_id: "worker1".to_string(),
-        job_types: vec!["test_queue".to_string()],
+        job_types: vec!["send_email".to_string()],
     });
     let consume_response = service.consume_jobs(consume_request).await.unwrap();
     let mut stream = consume_response.into_inner();
@@ -343,7 +348,7 @@ async fn test_consume_jobs_full_retry_workflow() {
         sleep(Duration::from_millis(500)).await;
         
         let request = Request::new(EnqueueJobRequest {
-            job_type: "test_queue".to_string(),
+            job_type: "send_email".to_string(),
             payload: json!({"test": "data"}).to_string(),
             priority: 2,
             scheduled_at: "2025-08-04T21:00:00Z".to_string(),
@@ -376,7 +381,7 @@ async fn test_consume_jobs_full_retry_workflow() {
     })).await.unwrap();
 
     // Attempt 2: First retry
-    let job2 = timeout(Duration::from_secs(30), stream.next()).await
+    let job2 = timeout(Duration::from_secs(60), stream.next()).await
         .expect("Should receive retry 1")
         .expect("Stream ended")
         .expect("Stream error");
@@ -389,7 +394,7 @@ async fn test_consume_jobs_full_retry_workflow() {
     })).await.unwrap();
 
     // Attempt 3: Second retry
-    let job3 = timeout(Duration::from_secs(30), stream.next()).await
+    let job3 = timeout(Duration::from_secs(60), stream.next()).await
         .expect("Should receive retry 2")
         .expect("Stream ended")
         .expect("Stream error");

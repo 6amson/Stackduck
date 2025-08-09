@@ -14,6 +14,7 @@ service StackDuckService {
   // Internal endpoints
   rpc RetryJob(RetryJobRequest) returns (RetryJobResponse);
   rpc DequeueJob(DequeueJobRequest) returns (DequeueJobResponse);
+  rpc DequeueRetriedJob(DequeueRetriedJobRequest) returns (DequeueRetriedJobResponse);
 }
 
 // Request/Response messages
@@ -43,13 +44,22 @@ message DequeueJobResponse {
   string error_message = 3;
 }
 
+message DequeueRetriedJobRequest {
+  GrpcJob job = 1;
+}
+
+message DequeueRetriedJobResponse {
+  bool success = 1;
+}
+
 message ConsumeJobsRequest {
   string worker_id = 1;
   repeated string job_types = 2;
 }
 
 message RetryJobRequest {
-  string job_id = 1;       // required: ID of the job to retry
+  string job_id = 1;       
+  string error_message = 2;
 }
 
 message RetryJobResponse {

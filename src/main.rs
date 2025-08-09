@@ -3,9 +3,11 @@ use stackduck::grpc::StackduckGrpcService;
 use stackduck::types::JobManager;
 use stackduck::{stackduck::stack_duck_service_server::StackDuckServiceServer, StackDuck};
 use tokio::signal;
+use tokio::sync::RwLock;
 use tonic::transport::Server;
 
 use dotenvy;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 #[tokio::main]
@@ -34,11 +36,24 @@ async fn main() -> Result<(), StackDuckError> {
     let job_manager = Arc::new(JobManager {
         db_pool: stackduck.db_pool.clone(),
         redis_pool: stackduck.redis_client.clone(),
+        subscribed_job_types: Arc::new(RwLock::new(HashSet::new())),
     });
-    let grpc_service = StackduckGrpcService::new(job_manager);
+    let grpc_service = StackduckGrpcService::new(job_manager.clone());
+
+    // Spawn the poll loop in the background
+    let poll_service = grpc_service.clone();
+    tokio::spawn(async move {
+        poll_service.start_scheduled_job_poller().await;
+    });
 
     // Start gRPC server
     println!("🚀 Starting gRPC server on {}", server_addr);
+
+    {
+    let mut subscribed = grpc_service.job_manager.subscribed_job_types.write().await;
+    subscribed.insert("test_job".to_string());
+    subscribed.insert("send_email".to_string());
+}
 
     Server::builder()
         .add_service(StackDuckServiceServer::new(grpc_service))

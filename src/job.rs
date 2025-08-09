@@ -1,15 +1,14 @@
+use crate::stackduck::{DequeueRetriedJobRequest, GrpcJob};
 use crate::{
-    error::StackDuckError, types::{Job, JobManager, JobStatus, DEQUEUE_SCRIPT}
+    error::StackDuckError,
+    grpc::StackduckGrpcService,
+    types::{Job, JobManager, JobStatus, DEQUEUE_SCRIPT},
 };
 use chrono::Utc;
 use deadpool_redis::{redis::AsyncCommands, Connection};
 use redis::Script;
 use std::vec;
 use uuid::Uuid;
-use crate::grpc::StackduckGrpcService;
-
-
-
 
 impl Job {
     pub fn new(
@@ -35,6 +34,33 @@ impl Job {
             completed_at: None,
             created_at: None,
             updated_at: None,
+        }
+    }
+}
+
+impl From<Job> for GrpcJob {
+    fn from(job: Job) -> Self {
+        Self {
+            id: job.id.to_string(),
+            job_type: job.job_type,
+            payload: job.payload.to_string(),
+            status: job.status,
+            priority: job.priority.unwrap_or_default(),
+            retry_count: job.retry_count.unwrap_or_default(),
+            max_retries: job.max_retries.unwrap_or_default(),
+            error_message: job.error_message.unwrap_or_default(),
+            delay: job.delay.unwrap_or_default(),
+            scheduled_at: job
+                .scheduled_at
+                .map(|dt| dt.timestamp())
+                .unwrap_or_default(),
+            started_at: job.started_at.map(|dt| dt.timestamp()).unwrap_or_default(),
+            completed_at: job
+                .completed_at
+                .map(|dt| dt.timestamp())
+                .unwrap_or_default(),
+            created_at: job.created_at.map(|dt| dt.timestamp()).unwrap_or_default(),
+            updated_at: job.updated_at.map(|dt| dt.timestamp()).unwrap_or_default(),
         }
     }
 }
@@ -111,6 +137,7 @@ impl JobManager {
         );
         Ok(inserted_job)
     }
+
     pub async fn dequeue(
         &self,
         queue_name: &str,
@@ -200,61 +227,12 @@ impl JobManager {
         Ok(())
     }
 
-    pub async fn nack_job(&self, job_id: &str, error_message: &str) -> Result<(), StackDuckError> {
-        // Get job details to check retry eligibility
-        let uuid = Uuid::parse_str(&job_id)
-            .map_err(|e| StackDuckError::JobError(format!("Invalid job ID: {}", e)))?;
-        let job = self.get_job_by_id(job_id).await?;
-        sqlx::query!(
-            r#"
-                UPDATE jobs
-                SET error_message = $1, updated_at = now()
-                WHERE id = $2
-                "#,
-            error_message,
-            uuid
-        )
-        .execute(&self.db_pool)
-        .await
-        .map_err(|e| StackDuckError::JobError(format!("Failed to persist error message: {}", e)))?;
-
-        let mut conn = self.redis_pool.get_redis_client().await?;
-        let updates = vec![("error_message".to_string(), error_message.to_string())];
-        self.update_redis_job_property(&mut conn, job_id.to_string(), &updates)
-            .await?;
-        println!("Job {} nacked with error: {}", job_id, error_message);
-
-        if let Some(mut job) = job {
-            job.error_message = Some(error_message.to_string());
-            let current_retry_count = job.retry_count.unwrap_or_default();
-            let max_retries = job.max_retries.unwrap_or_default();
-
-            if current_retry_count < max_retries {
-                println!("Job {} is eligible for retry", job_id);
-                // Job is eligible for retry
-                // job.retry_count = Some(current_retry_count + 1);
-                self.retry_job(job).await?;
-            } else {
-                println!("Max retries exceeded for job {}", job_id);
-                // Max retries exceeded - mark as permanently failed and move to dead letter queue
-                self.handle_nack(job_id, &job).await?;
-            }
-        } else {
-            return Err(StackDuckError::JobError(format!(
-                "Job {} not found",
-                job_id
-            )));
-        }
-
-        Ok(())
-    }
-
-    pub async fn retry_job(&self, mut job: Job) -> Result<(), StackDuckError> {
+    pub async fn retry_job(&self, mut job: Job, error_message: &str) -> Result<(), StackDuckError> {
         let uuid = Uuid::parse_str(&job.id.to_string())
             .map_err(|e| StackDuckError::JobError(format!("Invalid job ID: {}", e)))?;
 
         let retry_count = job.retry_count.unwrap_or_default();
-        let max_retries = job.max_retries.unwrap_or_default();
+        // let max_retries = job.max_retries.unwrap_or_default();
 
         let new_retry_count = retry_count + 1;
 
@@ -271,6 +249,7 @@ impl JobManager {
         job.scheduled_at = Some(scheduled_at);
         job.started_at = None;
         job.retry_count = Some(new_retry_count);
+        job.error_message = Some(error_message.to_string());
 
         // Update in Postgres
         sqlx::query(
@@ -279,6 +258,7 @@ impl JobManager {
         SET status = 'Queued', 
             retry_count = $2, 
             scheduled_at = $3,
+            error_message = $4,
             started_at = NULL,
             updated_at = NOW()
         WHERE id = $1
@@ -287,6 +267,7 @@ impl JobManager {
         .bind(uuid)
         .bind(new_retry_count)
         .bind(scheduled_at)
+        .bind(error_message)
         .execute(&self.db_pool)
         .await
         .map_err(|e| StackDuckError::JobError(format!("Failed to update job for retry: {}", e)))?;
@@ -310,13 +291,9 @@ impl JobManager {
         let queue_key = format!("Stackduck:queue:{}", job.job_type);
         let job_json = serde_json::to_string(&job)?;
 
-
         let priority = job.priority.unwrap_or(2);
 
-        let base_timestamp = job
-            .scheduled_at
-            .unwrap_or_else(|| Utc::now())
-            .timestamp() as f64;
+        let base_timestamp = job.scheduled_at.unwrap_or_else(|| Utc::now()).timestamp() as f64;
 
         // Reverse priority scoring so lower numbers = higher priority
         // Priority 1 (high) = 0, Priority 2 (medium) = 1, Priority 3 (low) = 2
@@ -331,12 +308,45 @@ impl JobManager {
         // Update job cache
         let cache_key = format!("Stackduck:job:{}", job.id);
         let _: Result<String, _> = conn.set_ex(&cache_key, &job_json, 3600).await;
-        println!("Job {:?} re-enqueued for retry", job);
+        println!(
+            "Job from queue {} and with ID {} re-enqueued for retry",
+            job.job_type, job.id
+        );
 
         Ok(())
     }
 
     // HELPER METHODS
+    pub async fn get_due_jobs_sequentially(
+        &self,
+        job_types: &[&str],
+    ) -> Result<Option<Job>, StackDuckError> {
+        let mut conn = self.redis_pool.get_redis_client().await?;
+        let now_ts = chrono::Utc::now().timestamp_millis() as f64;
+
+        for job_type in job_types {
+            let queue_key = format!("Stackduck:queue:{}", job_type);
+
+            // Get jobs whose score (scheduled_at) <= now
+            let due_jobs: Vec<String> = redis::cmd("ZRANGEBYSCORE")
+                .arg(&queue_key)
+                .arg("-inf") // min score
+                .arg(chrono::Utc::now().timestamp()) // max score = now
+                .arg("LIMIT")
+                .arg(0) // offset
+                .arg(10) // count
+                .query_async(&mut conn)
+                .await?;
+
+            if let Some(job_json) = due_jobs.into_iter().next() {
+                let job: Job = serde_json::from_str(&job_json)?;
+                return Ok(Some(job));
+            }
+        }
+
+        Ok(None)
+    }
+
     pub async fn update_dequeue_job_status(
         &self,
         job_id: &str,
@@ -370,19 +380,26 @@ impl JobManager {
         Ok(())
     }
 
-    async fn handle_nack(&self, job_id: &str, job: &Job) -> Result<(), StackDuckError> {
+    pub async fn nack_job(&self, job_id: &str, error_message: &str) -> Result<(), StackDuckError> {
         let uuid = Uuid::parse_str(&job_id)
             .map_err(|e| StackDuckError::JobError(format!("Invalid job ID: {}", e)))?;
-        // Update in Postgres with failed status and failed_at timestamp
-        sqlx::query(
-        "UPDATE jobs SET status = 'failed', completed_at = NOW(), updated_at = NOW() WHERE id = $1"
-    )
-    .bind(uuid)
-    .execute(&self.db_pool)
-    .await
-    .map_err(|e| {
-        StackDuckError::JobError(format!("Failed to mark job as permanently failed: {}", e))
-    })?;
+
+        let job: Job = sqlx::query_as::<_, Job>(
+            "UPDATE jobs 
+     SET error_message = $1, 
+         status = 'failed', 
+         completed_at = NOW(), 
+         updated_at = NOW() 
+     WHERE id = $2 
+     RETURNING *",
+        )
+        .bind(error_message)
+        .bind(uuid)
+        .fetch_one(&self.db_pool)
+        .await
+        .map_err(|e| {
+            StackDuckError::JobError(format!("Failed to mark job as permanently failed: {}", e))
+        })?;
 
         // Remove from Redis running queue and move to dead letter queue
         let mut conn = self.redis_pool.get_redis_client().await?;
@@ -439,6 +456,7 @@ impl JobManager {
         let _ = self
             .update_redis_job_property(&mut conn, job_id.to_string(), &updates)
             .await;
+        println!("Nacked this job: {:?}", job);
 
         Ok(())
     }
@@ -536,6 +554,8 @@ impl JobManager {
             let _: Result<String, _> = conn.set_ex(&cache_key, &job_json, 3600).await;
             // Cache for 1 hour
         }
+
+        println!("Got this job man job: {:?}",  &job);
 
         Ok(job)
     }

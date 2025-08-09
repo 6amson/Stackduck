@@ -3,10 +3,11 @@ use chrono::{DateTime, Duration, Utc};
 use deadpool_redis::Pool;
 use serde::{self, Deserialize, Serialize};
 use sqlx::{FromRow, Type};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::{Arc};
 use std::time::Instant;
 use strum_macros::Display;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 use uuid::Uuid;
 
 pub type InMemoryQueue = Mutex<HashMap<String, VecDeque<Job>>>;
@@ -49,6 +50,7 @@ pub struct RedisClient {
 pub struct JobManager {
     pub db_pool: postgres::DbPool,
     pub redis_pool: RedisClient,
+    pub subscribed_job_types: Arc<RwLock<HashSet<String>>>,
 }
 
 #[derive(Clone, Debug)]
@@ -69,23 +71,23 @@ pub enum NotificationType {
     // ScheduledJob,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize,)]
-pub struct GrpcJob {
-    pub id: String,
-    pub job_type: String,
-    pub payload: String,
-    pub status: String,
-    pub priority: i32,
-    pub retry_count: i32,
-    pub max_retries: i32,
-    pub error_message: String,
-    pub delay: i32,
-    pub scheduled_at: i64,
-    pub started_at: i64,
-    pub completed_at: i64,
-    pub created_at: i64,
-    pub updated_at: i64,
-}
+// #[derive(Debug, Clone, Serialize, Deserialize,)]
+// pub struct GrpcJob {
+//     pub id: String,
+//     pub job_type: String,
+//     pub payload: String,
+//     pub status: String,
+//     pub priority: i32,
+//     pub retry_count: i32,
+//     pub max_retries: i32,
+//     pub error_message: String,
+//     pub delay: i32,
+//     pub scheduled_at: i64,
+//     pub started_at: i64,
+//     pub completed_at: i64,
+//     pub created_at: i64,
+//     pub updated_at: i64,
+// }
 
 pub const DEQUEUE_SCRIPT: &str = r#"
     local queue_key = KEYS[1]
