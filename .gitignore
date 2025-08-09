@@ -27,11 +27,6 @@ README.md
 *.md
 docs/
 
-# CI/CD
-.github/
-.gitlab-ci.yml
-.travis.yml
-
 # Environment files (should be handled via environment variables)
 .env
 .env.local

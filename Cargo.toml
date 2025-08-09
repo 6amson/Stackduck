@@ -1,6 +1,9 @@
 [package]
 name = "stackduck"
 version = "0.1.0"
+description = "High-performance distributed job queue system"
+license = "MIT"
+repository = "https://github.com/6amson/stackduck"
 edition = "2021"
 
 [[bin]]
