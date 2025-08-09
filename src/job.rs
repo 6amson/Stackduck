@@ -102,7 +102,7 @@ impl JobManager {
 
         let base_timestamp = inserted_job
             .scheduled_at
-            .unwrap_or_else(|| Utc::now())
+            .unwrap_or(chrono::Utc::now())
             .timestamp() as f64;
 
         // Reverse priority scoring so lower numbers = higher priority
