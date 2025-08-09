@@ -121,7 +121,7 @@ Create a `.env` file:
 ```env
 DATABASE_URL=postgresql://user:password@localhost/stackduck
 REDIS_URL=redis://localhost:6379
-GRPC_PORT=50051
+SERVER_ADDR=127.0.0.1:50051 (optional)
 ```
 
 ### Running the Server
