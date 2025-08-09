@@ -87,7 +87,7 @@ Producers (Framework Agnostic)
 
 - Rust 1.70+
 - PostgreSQL 12+
-- Redis 6+ (optional but recommended)
+- Redis 6+
 
 ### Installation
 
@@ -125,9 +125,8 @@ let request = EnqueueJobRequest {
     job_type: "email_send".to_string(),
     payload: r#"{"to": "user@example.com", "subject": "Welcome!"}"#.to_string(),
     priority: 1,        // High priority (1-3)
-    delay: 0,           // Execute immediately after failure
-    max_retries: 3,     // Max retries up to 3 times
-    retry_count: 0,     // Retry count
+    delay: 0,           // Execute retry after delay * 
+    max_retries: 3,     // Max retries up to 4 times
 };
 
 let response = client.enqueue_job(request).await?;
@@ -201,9 +200,8 @@ Adds a new job to the queue.
 - `job_type`: String identifier for the job type
 - `payload`: JSON string with job data
 - `priority`: Job priority (1-3, defaults to 2)
-- `delay`: Delay before execution in seconds, defaults to 30
-- `max_retries`: Maximum retry attempts, defaults to 4
-- `retry_count`: Current retry count, defaults to 0
+- `delay`: Time basis for calculating exponential backoff in seconds, defaults to 30
+- `max_retries`: Maximum retry attempts if job failed, defaults to 2
 
 #### `DequeueJob`
 Pulls a single job from a specific queue. [This is an internally called endpoint].
@@ -232,7 +230,7 @@ Marks a job as failed with an error message.
 - `error_message`: Description of the failure
 
 #### `RetryJob`
-Retries a failed job if within retry limits.
+Retries a failed job if within max retry limits. [This is an internally called endpoint]
 
 **Request**: `RetryJobRequest`
 - `job_id`: ID of the job to retry
@@ -242,12 +240,7 @@ Retries a failed job if within retry limits.
 ### Redis (Primary)
 - Fast job queuing and dequeuing
 - Used for active job processing
-- Optional but highly recommended
-
-### In-Memory (Fallback)
-- Temporary storage when Redis is unavailable
-- Automatic failover from Redis
-- Jobs lost on server restart
+- Caching jobs for faster retrieval
 
 ### PostgreSQL (Persistence)
 - Stores job metadata and history
@@ -262,7 +255,7 @@ Retries a failed job if within retry limits.
 4. **Completion**: 
    - Success: `complete_job()` → status "completed"
    - Failure: `fail_job()` → retry if attempts remain, else "failed"
-   - Retry: `retry_job()` → back to "pending" with incremented retry count
+   - Retry: `retry_job()` → back to "Queued" with incremented retry count
 
 ## Configuration
 

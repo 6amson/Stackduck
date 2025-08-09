@@ -48,31 +48,6 @@ impl StackduckGrpcService {
         }
     }
 
-    // Convert Job struct to gRPC Job message
-    // pub fn job_to_grpc(job: Job) -> GrpcJob {
-    //     GrpcJob {
-    //         id: job.id.to_string(),
-    //         job_type: job.job_type,
-    //         payload: job.payload.to_string(),
-    //         status: job.status,
-    //         priority: job.priority.unwrap_or_default(),
-    //         retry_count: job.retry_count.unwrap_or_default(),
-    //         max_retries: job.max_retries.unwrap_or_default(),
-    //         error_message: job.error_message.unwrap_or_default(),
-    //         delay: job.delay.unwrap_or_default(),
-    //         scheduled_at: job
-    //             .scheduled_at
-    //             .map(|dt| dt.timestamp())
-    //             .unwrap_or_default(),
-    //         started_at: job.started_at.map(|dt| dt.timestamp()).unwrap_or_default(),
-    //         completed_at: job
-    //             .completed_at
-    //             .map(|dt| dt.timestamp())
-    //             .unwrap_or_default(),
-    //         created_at: job.created_at.map(|dt| dt.timestamp()).unwrap_or_default(),
-    //         updated_at: job.updated_at.map(|dt| dt.timestamp()).unwrap_or_default(),
-    //     }
-    // }
 
     fn merge_notification_receivers(
         mut receivers: Vec<tokio::sync::broadcast::Receiver<JobNotification>>,
@@ -173,14 +148,14 @@ impl StackDuckService for StackduckGrpcService {
             None
         };
 
-        let max_retries = if (0..=4).contains(&req.max_retries) {
+        let max_retries = if (0..=3).contains(&req.max_retries) {
             req.max_retries
         } else {
             eprintln!("Invalid max retries {}, defaulting to 2", req.max_retries);
             2
         };
 
-        let delay = if (0..=3600).contains(&req.delay) {
+        let delay = if (1..=3600).contains(&req.delay) {
             req.delay
         } else {
             eprintln!("Invalid delay {}, defaulting to 30 seconds", req.delay);
