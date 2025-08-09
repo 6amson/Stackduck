@@ -92,6 +92,17 @@ Producers (Framework Agnostic)
 ### Installation
 
 ```bash
+cargo install stackduck
+
+export DATABASE_URL="postgres://user:pass@localhost/mydb"
+export REDIS_URL="redis://127.0.0.1:6379"
+export SERVER_ADDR="127.0.0.1:50051" (optional)
+
+stackduck
+```
+
+
+```bash
 git clone https://github.com/6amson/Stackduck
 cd Stackduck
 cargo build --release
@@ -125,8 +136,8 @@ let request = EnqueueJobRequest {
     job_type: "email_send".to_string(),
     payload: r#"{"to": "user@example.com", "subject": "Welcome!"}"#.to_string(),
     priority: 1,        // High priority (1-3)
-    delay: 0,           // Execute retry after delay * 
-    max_retries: 3,     // Max retries up to 4 times
+    delay: 0,           // Execute retry after delay * 2^retry_count, capped at 1hr.
+    max_retries: 3,     // Max retries up to 3 times
 };
 
 let response = client.enqueue_job(request).await?;
@@ -255,7 +266,7 @@ Retries a failed job if within max retry limits. [This is an internally called e
 4. **Completion**: 
    - Success: `complete_job()` → status "completed"
    - Failure: `fail_job()` → retry if attempts remain, else "failed"
-   - Retry: `retry_job()` → back to "Queued" with incremented retry count
+   - Retry: `retry_job()` → back to "Queued" with incremented retry count and exponential backoff
 
 ## Configuration
 
@@ -270,7 +281,6 @@ Retries a failed job if within max retry limits. [This is an internally called e
 - **Priority**: 2 (medium)
 - **Max Retries**: 2
 - **Delay**: 30 seconds
-- **Retry Count**: 0
 
 ## Language Support
 
@@ -309,13 +319,4 @@ Built-in metrics and logging for:
 ## License
 
 MIT License - see [LICENSE](LICENSE) file for details.
-
-## Roadmap
-
-- [ ] Web UI for job monitoring
-- [ ] Prometheus metrics export
-- [ ] Job scheduling with cron syntax
-- [ ] Dead letter queues
-- [ ] Job batching support
-- [ ] Multi-tenant support
 
