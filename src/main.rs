@@ -6,7 +6,6 @@ use tokio::signal;
 use tokio::sync::RwLock;
 use tonic::transport::Server;
 
-use dotenvy;
 use std::collections::HashSet;
 use std::sync::Arc;
 
