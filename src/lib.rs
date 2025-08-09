@@ -11,7 +11,6 @@ use crate::db::postgres::{connect_to_db, DbPool};
 use crate::db::redis::connect_to_redis;
 use crate::error::StackDuckError;
 use crate::types::RedisClient;
-use deadpool_redis;
 use sqlx::{pool::PoolConnection, Postgres};
 
 pub struct StackDuck {
@@ -25,7 +24,7 @@ impl StackDuck {
         let redis_client = connect_to_redis(redis_url).await?;
         Ok(Self {
             db_pool,
-            redis_client: redis_client,
+            redis_client
         })
     }
 

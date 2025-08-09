@@ -1,4 +1,4 @@
-use crate::stackduck::{ GrpcJob};
+use crate::stackduck::GrpcJob;
 use crate::{
     error::StackDuckError,
     types::{Job, JobManager, JobStatus, DEQUEUE_SCRIPT},
@@ -76,16 +76,16 @@ impl JobManager {
     RETURNING *
     "#,
         )
-        .bind(&work.id)
-        .bind(&work.job_type)
-        .bind(&work.payload)
+        .bind(work.id)
+        .bind(work.job_type)
+        .bind(work.payload)
         .bind(JobStatus::Queued.to_string())
-        .bind(&work.priority)
-        .bind(&work.retry_count)
-        .bind(&work.error_message)
-        .bind(&work.delay)
-        .bind(&work.max_retries)
-        .bind(&work.scheduled_at)
+        .bind(work.priority)
+        .bind(work.retry_count)
+        .bind(work.error_message)
+        .bind(work.delay)
+        .bind(work.max_retries)
+        .bind(work.scheduled_at)
         .fetch_one(&self.db_pool)
         .await
         .map_err(|e| {
@@ -147,12 +147,12 @@ impl JobManager {
         // Only Redis - no fallbacks, no race conditions
         let mut conn = self.redis_pool.get_redis_client().await?;
         let script_result: Option<String> = Script::new(DEQUEUE_SCRIPT)
-            .key(&format!("Stackduck:queue:{}", queue_name))
+            .key(format!("Stackduck:queue:{}", queue_name))
             .key("Stackduck:running")
-            .key(&format!("lock:dequeue:{}", queue_name))
-            .arg(&worker_id)
-            .arg(&Utc::now().timestamp().to_string())
-            .arg(&(Utc::now().timestamp() + 1800).to_string())
+            .key(format!("lock:dequeue:{}", queue_name))
+            .arg(worker_id)
+            .arg(Utc::now().timestamp().to_string())
+            .arg((Utc::now().timestamp() + 1800).to_string())
             .arg("1000")
             .invoke_async(&mut *conn)
             .await?;
@@ -184,7 +184,7 @@ impl JobManager {
     }
 
     pub async fn ack_job(&self, job_id: &str) -> Result<(), StackDuckError> {
-        let uuid = Uuid::parse_str(&job_id)
+        let uuid = Uuid::parse_str(job_id)
             .map_err(|e| StackDuckError::JobError(format!("Invalid job ID: {}", e)))?;
 
         // Redis is required - get connection first
@@ -194,7 +194,7 @@ impl JobManager {
         let running_jobs: Vec<String> = conn
             .zrange("Stackduck:running", 0, -1)
             .await
-            .map_err(|e| StackDuckError::RedisJobError(e))?;
+            .map_err(StackDuckError::RedisJobError)?;
 
         let job_prefix = format!("{}:", job_id);
         for entry in running_jobs {
@@ -280,7 +280,7 @@ impl JobManager {
             .unwrap_or_default();
 
         for entry in running_jobs {
-            if entry.starts_with(&format!("{}:", job.id.to_string())) {
+            if entry.starts_with(&format!("{}:", job.id)) {
                 let _: () = conn.zrem("Stackduck:running", &entry).await?;
                 break;
             }
@@ -292,7 +292,7 @@ impl JobManager {
 
         let priority = job.priority.unwrap_or(2);
 
-        let base_timestamp = job.scheduled_at.unwrap_or_else(|| Utc::now()).timestamp() as f64;
+        let base_timestamp = job.scheduled_at.unwrap_or_else(chrono::Utc::now).timestamp() as f64;
 
         // Reverse priority scoring so lower numbers = higher priority
         // Priority 1 (high) = 0, Priority 2 (medium) = 1, Priority 3 (low) = 2
@@ -354,7 +354,7 @@ impl JobManager {
         sqlx::query(
             "UPDATE jobs SET status = $1, started_at = NOW(), updated_at = NOW() WHERE id = $2",
         )
-        .bind(&new_status.to_string())
+        .bind(new_status.to_string())
         .bind(job_id)
         .execute(&self.db_pool)
         .await
@@ -379,7 +379,7 @@ impl JobManager {
     }
 
     pub async fn nack_job(&self, job_id: &str, error_message: &str) -> Result<(), StackDuckError> {
-        let uuid = Uuid::parse_str(&job_id)
+        let uuid = Uuid::parse_str(job_id)
             .map_err(|e| StackDuckError::JobError(format!("Invalid job ID: {}", e)))?;
 
         let job: Job = sqlx::query_as::<_, Job>(
@@ -405,7 +405,7 @@ impl JobManager {
         let running_jobs: Vec<String> = conn
             .zrange("Stackduck:running", 0, -1)
             .await
-            .map_err(|e| StackDuckError::RedisJobError(e))?;
+            .map_err(StackDuckError::RedisJobError)?;
         for entry in running_jobs {
             if entry.starts_with(&format!("{}:", job_id)) {
                 let _: () = conn.zrem("Stackduck:running", &entry).await?;
@@ -521,12 +521,12 @@ impl JobManager {
         let _: () = conn
             .set_ex(&cache_key, new_job_json, ttl)
             .await
-            .map_err(|e| StackDuckError::RedisJobError(e))?;
+            .map_err(StackDuckError::RedisJobError)?;
         Ok(job)
     }
 
     pub async fn get_job_by_id(&self, job_id: &str) -> Result<Option<Job>, StackDuckError> {
-        let uuid = Uuid::parse_str(&job_id)
+        let uuid = Uuid::parse_str(job_id)
             .map_err(|e| StackDuckError::JobError(format!("Invalid job ID: {}", e)))?;
         // Try Redis cache first if available
         let mut conn = self.redis_pool.get_redis_client().await?;
@@ -553,7 +553,7 @@ impl JobManager {
             // Cache for 1 hour
         }
 
-        println!("Got this job man job: {:?}",  &job);
+        println!("Got this job man job: {:?}", &job);
 
         Ok(job)
     }
