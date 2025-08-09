@@ -23,6 +23,9 @@ jobs:
         run: |
           CARGO_VERSION=$(grep '^version' Cargo.toml | head -1 | cut -d'"' -f2)
           TAG_VERSION=${GITHUB_REF#refs/tags/v}
+          echo "Cargo.toml version: '$CARGO_VERSION'"
+          echo "Git tag version: '$TAG_VERSION'"
+          echo "GITHUB_REF: '$GITHUB_REF'"
           [ "$CARGO_VERSION" = "$TAG_VERSION" ] || exit 1
       
       - name: Lint and test
