@@ -1,7 +1,6 @@
-use crate::stackduck::{DequeueRetriedJobRequest, GrpcJob};
+use crate::stackduck::{ GrpcJob};
 use crate::{
     error::StackDuckError,
-    grpc::StackduckGrpcService,
     types::{Job, JobManager, JobStatus, DEQUEUE_SCRIPT},
 };
 use chrono::Utc;
@@ -322,7 +321,6 @@ impl JobManager {
         job_types: &[&str],
     ) -> Result<Option<Job>, StackDuckError> {
         let mut conn = self.redis_pool.get_redis_client().await?;
-        let now_ts = chrono::Utc::now().timestamp_millis() as f64;
 
         for job_type in job_types {
             let queue_key = format!("Stackduck:queue:{}", job_type);

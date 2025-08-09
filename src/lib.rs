@@ -20,14 +20,9 @@ pub struct StackDuck {
 }
 
 impl StackDuck {
-
-    pub async fn new(
-        database_url: &str,
-        redis_url: &str,
-    ) -> Result<Self, StackDuckError> {
+    pub async fn new(database_url: &str, redis_url: &str) -> Result<Self, StackDuckError> {
         let db_pool = connect_to_db(database_url).await?;
-        let redis_client = connect_to_redis(redis_url)
-            .await?;
+        let redis_client = connect_to_redis(redis_url).await?;
         Ok(Self {
             db_pool,
             redis_client: redis_client,
