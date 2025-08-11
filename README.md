@@ -144,6 +144,7 @@ let request = EnqueueJobRequest {
     priority: 1,        // High priority (1-3)
     delay: 0,           // Execute retry after delay * 2^retry_count, capped at 1hr.
     max_retries: 3,     // Max retries up to 3 times
+       scheduled_at: None, // ISO timestamp for scheduled execution, None for immediate
 };
 
 let response = client.enqueue_job(request).await?;
@@ -219,6 +220,7 @@ Adds a new job to the queue.
 - `priority`: Job priority (1-3, defaults to 2)
 - `delay`: Time basis for calculating exponential backoff in seconds, defaults to 30
 - `max_retries`: Maximum retry attempts if job failed, defaults to 2
+- `scheduled_at`: ISO 8601 timestamp to schedule the job for future execution
 
 #### `DequeueJob`
 Pulls a single job from a specific queue. [This is an internally called endpoint].
