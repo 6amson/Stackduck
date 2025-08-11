@@ -1,6 +1,6 @@
 [package]
 name = "stackduck"
-version = "0.1.2"
+version = "0.1.3"
 description = "High-performance distributed queue system"
 license = "MIT"
 repository = "https://github.com/6amson/stackduck"
