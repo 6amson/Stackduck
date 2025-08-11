@@ -14,7 +14,7 @@ Stackduck provides a robust foundation for background job processing in distribu
 - **Retry Logic**: Configurable retry attempts with exponential backoff
 - **Real-time Workers**: Streaming job consumption with instant notifications
 - **Fault Tolerance**: Automatic failover between storage layers
-- **Job Scheduling**: Delay jobs for future execution
+- **Job Scheduling**: Schedule jobs for future execution
 - **Worker Coordination**: Multi-worker support with race condition handling
 
 ## 🛠️ Architecture Overview

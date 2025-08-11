@@ -6,6 +6,7 @@ use crate::{
 use chrono::Utc;
 use deadpool_redis::{redis::AsyncCommands, Connection};
 use redis::Script;
+use tracing::{debug, info};
 use std::vec;
 use uuid::Uuid;
 
@@ -113,7 +114,7 @@ impl JobManager {
         // This gives us priority differences of 1000 seconds (16 minutes)
         let score = base_timestamp + (priority_offset * 1000.0);
 
-        println!(
+        info!(
             "🔍 Enqueue: job_id={}, priority={}, base_timestamp={}, final_score={}",
             inserted_job.id, priority, base_timestamp, score
         );
@@ -161,7 +162,7 @@ impl JobManager {
             let job: Job = serde_json::from_str(&job_json)?;
             let job_id = job.id.to_string();
 
-            println!("✅ Worker {} got job from REDIS: {}", worker_id, job.id);
+            debug!("✅ Worker {} got job from REDIS: {}", worker_id, job.id);
 
             let updates = vec![
                 ("status".to_string(), JobStatus::Running.to_string()),
@@ -307,7 +308,7 @@ impl JobManager {
         // Update job cache
         let cache_key = format!("Stackduck:job:{}", job.id);
         let _: Result<String, _> = conn.set_ex(&cache_key, &job_json, 3600).await;
-        println!(
+        info!(
             "Job from queue {} and with ID {} re-enqueued for retry",
             job.job_type, job.id
         );
@@ -454,7 +455,7 @@ impl JobManager {
         let _ = self
             .update_redis_job_property(&mut conn, job_id.to_string(), &updates)
             .await;
-        println!("Nacked this job: {:?}", job);
+        info!("Nacked this job: {:?}", job);
 
         Ok(())
     }
@@ -553,7 +554,7 @@ impl JobManager {
             // Cache for 1 hour
         }
 
-        println!("Got this job man job: {:?}", &job);
+        info!("Got this job man job: {:?}", &job);
 
         Ok(job)
     }

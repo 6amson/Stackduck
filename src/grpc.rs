@@ -76,14 +76,14 @@ impl StackduckGrpcService {
             // Get a snapshot of job types at the beginning of each iteration
             let job_types = {
             let all_job_types = self.job_manager.subscribed_job_types.read().await;
-            println!("🔍 Poller sees job_types: {:?} (count: {})", 
+            info!("🔍 Poller sees job_types: {:?} (count: {})", 
                     all_job_types, all_job_types.len()); 
             all_job_types.iter().cloned().collect::<Vec<String>>()
         };
 
             // Skip iteration if no job types are subscribed
             if job_types.is_empty() {
-                println!("No job types subscribed, skipping poll");
+                // println!("No job types subscribed, skipping poll");
                 tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                 continue;
             }
@@ -106,9 +106,9 @@ impl StackduckGrpcService {
                             Err(e) => println!("Error processing job: {:?}", e),
                         }
                     }
-                    None => println!("No due jobs found"),
+                    None => warn!("No due jobs found"),
                 },
-                Err(e) => println!("Error polling for due jobs: {:?}", e),
+                Err(e) => warn!("Error polling for due jobs: {:?}", e),
             }
 
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
@@ -265,7 +265,7 @@ impl StackDuckService for StackduckGrpcService {
         match self.job_manager.ack_job(&req.job_id).await {
             Ok(_) => Ok(Response::new(CompleteJobResponse { success: true })),
             Err(e) => {
-                println!("Failed to complete job {}: {}", req.job_id, e);
+                warn!("Failed to complete job {}: {}", req.job_id, e);
                 Ok(Response::new(CompleteJobResponse { success: false }))
             }
         }
@@ -290,7 +290,7 @@ impl StackDuckService for StackduckGrpcService {
                             Ok(Response::new(FailJobResponse { success: true }))
                         }
                         Err(e) => {
-                            println!("Failed to mark job {} as failed: {}", req.job_id, e);
+                            warn!("Failed to mark job {} as failed: {}", req.job_id, e);
                             Ok(Response::new(FailJobResponse { success: false }))
                         }
                     }
@@ -302,18 +302,18 @@ impl StackDuckService for StackduckGrpcService {
                     {
                         Ok(_) => Ok(Response::new(FailJobResponse { success: true })),
                         Err(e) => {
-                            println!("Failed to mark job {} as failed: {}", req.job_id, e);
+                            warn!("Failed to mark job {} as failed: {}", req.job_id, e);
                             Ok(Response::new(FailJobResponse { success: false }))
                         }
                     }
                 }
             }
             Ok(None) => {
-                println!("Failed to nack job {} as failed.", req.job_id);
+                info!("Failed to nack job {} as failed.", req.job_id);
                 Ok(Response::new(FailJobResponse { success: false }))
             }
             Err(e) => {
-                println!("Failed to nack job {} as failed: {}", req.job_id, e);
+                warn!("Failed to nack job {} as failed: {}", req.job_id, e);
                 Ok(Response::new(FailJobResponse { success: false }))
             }
         };
@@ -331,7 +331,7 @@ impl StackDuckService for StackduckGrpcService {
         let job = job_option.unwrap();
 
         let job_types = self.job_manager.subscribed_job_types.read().await;
-        println!("Job types: {:?}", job_types);
+        info!("Job types: {:?}", job_types);
 
         // USE YOUR EXISTING RETRY METHOD
         match self.job_manager.retry_job(job, &req.error_message).await {
@@ -340,7 +340,7 @@ impl StackDuckService for StackduckGrpcService {
                 Ok(Response::new(RetryJobResponse { success: true }))
             }
             Err(e) => {
-                println!("Failed to retry job {}: {}", req.job_id, e);
+                warn!("Failed to retry job {}: {}", req.job_id, e);
                 Ok(Response::new(RetryJobResponse { success: false }))
             }
         }
@@ -368,7 +368,7 @@ impl StackDuckService for StackduckGrpcService {
                 subscribed_job_types.insert(job_type.clone());
             }
             
-            println!("🔍 Just inserted job_types: {:?}", subscribed_job_types);
+            info!("🔍 Just inserted job_types: {:?}", subscribed_job_types);
         } 
 
         // Setup broadcast receivers - scope the lock properly
@@ -408,7 +408,7 @@ impl StackDuckService for StackduckGrpcService {
                 for _ in 0..job_types.len() {
                     let job_type = &job_types[queue_index % job_types.len()];
                     queue_index += 1;
-                    println!("🔴 Worker {} attempting dequeue for {}", worker_id, job_type);
+                   debug!("🔴 Worker {} attempting dequeue for {}", worker_id, job_type);
 
                     match job_manager.dequeue(job_type, Some(&worker_id)).await {
                         Ok(Some(job)) => {
@@ -440,11 +440,11 @@ impl StackDuckService for StackduckGrpcService {
 
             while let Some(notification) = notification_stream.next().await {
                 let job_type = &notification.job_type;
-                println!("Received notification of type: {} for job_type: {}", notification.notification_type, job_type);
+                debug!("Received notification of type: {} for job_type: {}", notification.notification_type, job_type);
 
                 match job_manager.dequeue(job_type, Some(&worker_id)).await {
                     Ok(Some(job)) => {
-                        println!("Successfully dequeued job: id={}, type={}", job.id, job.job_type);
+                        info!("Successfully dequeued job: id={}, type={}", job.id, job.job_type);
                         yield Ok(JobMessage {
                             job: Some(job.into()),
                             notification_type: notification.notification_type.to_string(),
